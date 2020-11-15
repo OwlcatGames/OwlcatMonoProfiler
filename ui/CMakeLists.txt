@@ -39,7 +39,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt5 COMPONENTS Widgets OpenGL REQUIRED)
+find_package(Qt5 COMPONENTS Widgets REQUIRED)
 find_package(Qwt REQUIRED)
 
 # For Windows builds, we'd like to copy DLL and PDB for Qwt to output folder, or the application
@@ -83,13 +83,13 @@ endif()
 
 set_property( TARGET owlcat_mono_profiler_ui PROPERTY CXX_STANDARD 17 )
 
-target_link_libraries( owlcat_mono_profiler_ui PRIVATE owlcat_mono_profiler_client Qt5::Widgets Qt5::OpenGL debug Qwt::Qwtd optimized Qwt::Qwt)
+target_link_libraries( owlcat_mono_profiler_ui PRIVATE owlcat_mono_profiler_client Qt5::Widgets debug Qwt::Qwtd optimized Qwt::Qwt)
 
 # Copy Qt DLLs to ouput folder
 #if (WIN32 AND NOT BUILD_FOR_PACKAGING)
     add_custom_command(
         TARGET owlcat_mono_profiler_ui
         POST_BUILD
-        COMMAND ${Qt5_DIR}/../../../bin/windeployqt.exe $<TARGET_FILE_DIR:owlcat_mono_profiler_ui>/$<TARGET_FILE_NAME:owlcat_mono_profiler_ui> -opengl
+        COMMAND ${Qt5_DIR}/../../../bin/windeployqt.exe $<TARGET_FILE_DIR:owlcat_mono_profiler_ui>/$<TARGET_FILE_NAME:owlcat_mono_profiler_ui> -opengl -angle --no-opengl-sw
     )
 #endif()
