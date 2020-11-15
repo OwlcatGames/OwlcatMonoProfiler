@@ -1,0 +1,4 @@
+build
+_deps
+external/detours/bin.*
+external/detours/lib.*
