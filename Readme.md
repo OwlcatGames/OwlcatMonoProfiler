@@ -6,6 +6,10 @@ Owlcat Mono Profiler is currently in early development stages. It is developed p
 
 Owlcat Mono Profiler is a part of a planned family of Unity-related tools called Owlcat Grooming Toolkit.
 
+## Screenshot
+
+![Profiler UI screenshot](doc/current_screen.png)
+
 ## Requirements
 
 Right now, Owlcat Mono Profiler is only compatible with desktop games made with a more-or-less recent version of Unity for Windows (the lowest tested version is 2018.4.10f, but earlier version might work, too). IL2CPP is not supported yet. The aim is to make it universal across the recent Unity versions, and cross-platform regarding both UI/client and target/server.
