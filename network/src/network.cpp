@@ -18,6 +18,16 @@ namespace owlcat
 	uint32_t message::next_id = 0;
 #endif
 
+	namespace protocol
+	{
+		const char* pipe_name = "\\\\.\\pipe\\OwlcatMonoProfiler";
+		const char* error_ok = "OK";
+		const char* error_symbols = "SYMBOLS";
+		const char* error_detour = "DETOUR";
+		const char* error_deque = "DEQUE";
+		const char* error_detour_late = "DETOUR2";
+	}
+
 	class network::details
 	{
 		moodycamel::ConcurrentQueue<message> m_read_buffer;

@@ -51,8 +51,22 @@ namespace owlcat
 		~mono_profiler_client();
 
 #if defined(WIN32)
+		enum LaunchResult
+		{
+			OK,
+			DETOUR_CREATE_WITH_DLL_FAILED,
+			DETOUR_PIPE_TIMEOUT,
+			DETOUR_PIPE_FAILED,
+			DETOUR_PIPE_READ_FAILED,
+			PDB_NOT_FOUND,
+			DETOUR_FAILED,
+			BAD_VERSION,
+			DETOUR_FAILED_LATE,
+			CONNECT_FAILED
+		};
+
 		// Launches target executable, detouring it using profiler's DLL. Allows profiling non-instrumented apps.
-		bool launch_executable(const std::string& executable, const std::string& args, int port, const std::string& db_file_name, const std::string& dll_location);
+		LaunchResult launch_executable(const std::string& executable, const std::string& args, int port, const std::string& db_file_name, const std::string& dll_location);
 #endif
 		// Attempts to connect to a running profiler server
 		bool start(const std::string& addr, int server_port, const std::string& db_file_name);

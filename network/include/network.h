@@ -29,6 +29,14 @@ namespace owlcat
 			CMD_PAUSE,
 			CMD_RESUME,
 		};
+
+		extern const char* pipe_name;
+		
+		extern const char* error_ok;
+		extern const char* error_symbols;
+		extern const char* error_detour;
+		extern const char* error_deque;
+		extern const char* error_detour_late;
 	}
 
 	struct message

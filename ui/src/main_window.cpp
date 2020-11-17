@@ -319,9 +319,43 @@ void main_window::onRunUnityApp()
     m_db_file_name = "";// ":memory:"; std::tmpnam(0);
 
     auto dllPath = QApplication::applicationDirPath() + "\\mono_profiler_mono.dll";
-    if (!m_client.launch_executable(path, args, port, m_db_file_name.c_str(), dllPath.toStdString()))
+    auto result = m_client.launch_executable(path, args, port, m_db_file_name.c_str(), dllPath.toStdString());
+    if (result != owlcat::mono_profiler_client::OK)
     {
-        QMessageBox::critical(nullptr, "Error", "Failed to launch the app or to connect to profiler server", QMessageBox::Ok);
+        const char* error = "Unknown error";
+        switch (result)        
+        {
+            case owlcat::mono_profiler_client::DETOUR_CREATE_WITH_DLL_FAILED:
+                error = "Failed to launch target executable with profiler DLL. Profiler DLL is missing or the executable is protected somehow. mono_profiler_server.dll should be placed in the same folder where mono_profiler_ui.exe resided";
+                break;
+            case owlcat::mono_profiler_client::DETOUR_PIPE_TIMEOUT:
+                error = "Failed to establish named pipe connection to profiler";
+                break;
+            case owlcat::mono_profiler_client::DETOUR_PIPE_FAILED:
+                error = "Pipe failed to enter message mode";
+                break;
+            case owlcat::mono_profiler_client::DETOUR_PIPE_READ_FAILED:
+                error = "Failed to read error code from named pipe";
+                break;
+            case owlcat::mono_profiler_client::PDB_NOT_FOUND:
+                error = "Unable to find necessary symbols. Probably PDB file is missing. Place PDB file for UnityPlayer.dll into the same folder where the target executable file resides";
+                break;
+            case owlcat::mono_profiler_client::DETOUR_FAILED:
+                error = "Failed to detour target executable";
+                break;
+            case owlcat::mono_profiler_client::BAD_VERSION:
+                error = "Failed to find necessary symbols. It is possible that the target application uses unsupported Unity version";
+                break;
+            case owlcat::mono_profiler_client::DETOUR_FAILED_LATE:
+                error = "Failed to detour target executable in player_init_engine_graphics_detour. This shouldn't really happen";
+                break;
+            case owlcat::mono_profiler_client::CONNECT_FAILED:
+                error = "Failed to connect to profiler server. Prossibly app failed to start in time";
+                break;
+        }
+
+        QString text = QString("Failed to launch app: %1").arg(error);
+        QMessageBox::critical(nullptr, "Error", text, QMessageBox::Ok);
         return;
     }
 

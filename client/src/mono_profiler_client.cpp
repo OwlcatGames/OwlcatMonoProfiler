@@ -464,7 +464,7 @@ namespace owlcat
 		}
 
 #if defined(WIN32)
-		bool launch_executable(const std::string& executable, const std::string& commandline, int port, const std::string& db_file_name, const std::string& dll_location)
+		mono_profiler_client::LaunchResult launch_executable(const std::string& executable, const std::string& commandline, int port, const std::string& db_file_name, const std::string& dll_location)
 		{
 			std::filesystem::path exec_path(executable);
 			std::string cwd = exec_path.parent_path().string();
@@ -485,19 +485,46 @@ namespace owlcat
 			if (!DetourCreateProcessWithDlls(executable.c_str(), (char*)commandline.c_str(), nullptr, nullptr, true, CREATE_DEFAULT_ERROR_MODE | CREATE_SUSPENDED, nullptr, cwd.c_str(), &si, &pi, 1, &dllLoc, nullptr))
 			{
 				int error_code = GetLastError();
-				return false;
+				return mono_profiler_client::DETOUR_CREATE_WITH_DLL_FAILED;
 			}			
 
 			ResumeThread(pi.hThread);
+			
+			auto start_time = std::chrono::system_clock::now();
+			HANDLE pipe = INVALID_HANDLE_VALUE;
+			while (std::chrono::system_clock::now() - start_time < std::chrono::seconds(15))
+			{
+				pipe = CreateFile(owlcat::protocol::pipe_name, GENERIC_READ | FILE_WRITE_ATTRIBUTES | FILE_FLAG_WRITE_THROUGH, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+				if (pipe != INVALID_HANDLE_VALUE)
+				{
+					break;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			}
 
-			// We need to wait until the app is started and the server is listening before attempting a connection, but
-			// we have no reliable way to do this for now, so just wait 5 seconds.
-			// We can't use WaitForInputIdle here, because server will block the main thread when listening for connection
-			// TODO: Investigate creating named pipes?
-			Sleep(5000);
+			if (pipe == INVALID_HANDLE_VALUE)
+				return mono_profiler_client::DETOUR_PIPE_TIMEOUT;
+
+			DWORD dwMode = PIPE_READMODE_MESSAGE;
+			if (!SetNamedPipeHandleState(pipe, &dwMode, NULL, NULL))
+				return mono_profiler_client::DETOUR_PIPE_FAILED;
+
+			char error_code[16];
+			DWORD read_bytes = 0;
+			if (!ReadFile(pipe, error_code, sizeof(error_code), &read_bytes, NULL))
+				return mono_profiler_client::DETOUR_PIPE_READ_FAILED;
+
+			if (strncmp(error_code, owlcat::protocol::error_symbols, sizeof(error_code)) == 0)
+				return mono_profiler_client::PDB_NOT_FOUND;
+			if (strncmp(error_code, owlcat::protocol::error_detour, sizeof(error_code)) == 0)
+				return mono_profiler_client::DETOUR_FAILED;
+			if (strncmp(error_code, owlcat::protocol::error_deque, sizeof(error_code)) == 0)
+				return mono_profiler_client::BAD_VERSION;
+			if (strncmp(error_code, owlcat::protocol::error_detour_late, sizeof(error_code)) == 0)
+				return mono_profiler_client::DETOUR_FAILED_LATE;
 
 			// We only support launching applications on the same computer, so use loopback IP
-			return start("127.0.0.1", port, db_file_name.c_str());
+			return start("127.0.0.1", port, db_file_name.c_str()) ? mono_profiler_client::OK : mono_profiler_client::CONNECT_FAILED;
 		}
 #endif
 
@@ -812,7 +839,7 @@ public:
 	}
 
 #if defined(WIN32)
-	bool mono_profiler_client::launch_executable(const std::string& executable, const std::string& args, int port, const std::string& db_file_name, const std::string& dll_location)
+	mono_profiler_client::LaunchResult mono_profiler_client::launch_executable(const std::string& executable, const std::string& args, int port, const std::string& db_file_name, const std::string& dll_location)
 	{
 		return m_details->launch_executable(executable, args, port, db_file_name, dll_location);
 	}
