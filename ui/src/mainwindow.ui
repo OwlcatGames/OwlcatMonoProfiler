@@ -560,6 +560,22 @@
     </hint>
    </hints>
   </connection>
+  <connection>
+   <sender>objectReferences</sender>
+   <signal>expanded(QModelIndex)</signal>
+   <receiver>MainWindow</receiver>
+   <slot>onReferenceExpanded(QModelIndex)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>416</x>
+     <y>421</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>598</x>
+     <y>599</y>
+    </hint>
+   </hints>
+  </connection>
  </connections>
  <slots>
   <slot>onAllocationsScrolled(int)</slot>
@@ -572,5 +588,6 @@
   <slot>onPauseApp(bool)</slot>
   <slot>onTypeFilterChanged(QString)</slot>
   <slot>onCallstackFilterChanged(QString)</slot>
+  <slot>onReferenceExpanded(QModelIndex)</slot>
  </slots>
 </ui>

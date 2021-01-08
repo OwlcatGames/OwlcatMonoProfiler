@@ -25,9 +25,6 @@ namespace owlcat
 		};
 		// A list of references to this object
 		std::vector<parent_info> parents;
-		
-		// for UI representation
-		mutable bool visited = false;
 	};
 
 	// Callbacks for commands

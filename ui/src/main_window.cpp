@@ -66,6 +66,66 @@ QString size_to_string(double value)
         return QString::number(value / 1024.0 / 1024.0, 'f', 2) + "Mb";
 }
 
+void test_references_tree(object_references_tree_model& model)
+{
+    FILE* f = fopen("test.fr", "r");
+    if (f == nullptr)
+        return;
+
+    uint64_t addr_count = 0;
+    fscanf(f, "%I64u", &addr_count);
+    if (addr_count <= 0)
+        return;
+
+    std::vector<uint64_t> test_addr;
+    for (auto i = 0; i < addr_count; ++i)
+    {
+        uint64_t addr;
+        fscanf(f, "\t%I64u", &addr);
+        test_addr.push_back(addr);
+    }
+
+    uint64_t ref_count = 0;
+    fscanf(f, "%I64u", &ref_count);
+    if (ref_count <= 0)
+        return;
+
+    std::vector<owlcat::object_references_t> test_refs;
+    for (auto i = 0; i < ref_count; ++i)
+    {
+        uint64_t addr = 0;
+        char type[1024];
+        uint64_t parent_count = 0;
+
+        fscanf(f, "\t%I64u \"%[^\"]\"", &addr, type);
+
+        owlcat::object_references_t ref{ addr, type };
+
+        fscanf(f, "\t\t\t%I64u", &parent_count);
+        for (auto p = 0; p < parent_count; ++p)
+        {
+            uint64_t parent_addr;
+            fscanf(f, "\t\t\t\t%I64u", &parent_addr);
+            ref.parents.push_back({ parent_addr });
+        }
+        test_refs.push_back(ref);
+    }
+
+    //std::vector<uint64_t> test_addr = { 1,2,3 };
+    //std::vector<owlcat::object_references_t> test_refs =
+    //{
+    //    {1, "Type1", {}},
+    //    {2, "Type1", {{4}, {5}}},
+    //    {3, "Type1", {{4}, {6}}},
+    //    {4, "Type4", {}},
+    //    {5, "Type5", {}},
+    //    {6, "Type6", {{7}}},
+    //    {7, "Type7", {{1}}},
+    //};
+    //
+    model.update("", test_addr, test_refs);
+}
+
 main_window::main_window(QWidget* parent) :
     QMainWindow(parent),
     m_ui(new Ui::MainWindow)
@@ -161,21 +221,8 @@ main_window::main_window(QWidget* parent) :
     
     connect(this, SIGNAL(onObjectReferencesFound(std::string, std::vector<uint64_t>, std::vector<owlcat::object_references_t>)), &m_object_references_tree_model, SLOT(update(std::string, std::vector<uint64_t>, std::vector<owlcat::object_references_t>)));
 
-//std::vector<uint64_t> test_addr = { 1,2,3 };
-//std::vector<owlcat::object_references_t> test_refs =
-//{
-//    {1, "Type1", {}},
-//    {2, "Type1", {{4}, {5}}},
-//    {3, "Type1", {{4}, {6}}},
-//    {4, "Type4", {}},
-//    {5, "Type5", {}},
-//    {6, "Type6", {{7}}},
-//    {7, "Type7", {{1}}},
-//};
-//
-//m_object_references_tree_model.update("", test_addr, test_refs);
-    m_ui->objectReferences->setModel(&m_object_references_tree_model);
-    
+    //test_references_tree(m_object_references_tree_model);
+    m_ui->objectReferences->setModel(&m_object_references_tree_model);    
 }
 
 main_window::~main_window()
@@ -485,7 +532,7 @@ void main_window::onLiveObjectsCallstacksContextMenuRequested(QPoint point)
     m_callstacksMenu->popup(m_ui->callstacksList->viewport()->mapToGlobal(point));
 }
 
-void main_window::onCallstackMenuAction(bool)
+void main_window::onCallstackMenuAction(bool state)
 {
     auto currentIndex = m_ui->callstacksList->currentIndex();
     if (currentIndex == QModelIndex())
@@ -493,7 +540,7 @@ void main_window::onCallstackMenuAction(bool)
 
     currentIndex = m_live_callstack_by_type_filter_model.mapToSource(currentIndex);
 
-    uint64_t type_id = m_live_callstack_by_type_filter_model.data(currentIndex, Qt::UserRole).toInt(); //m_live_objects_by_type_model.data(currentIndex, Qt::UserRole).toInt();
+    uint64_t type_id = m_live_objects_by_type_model.data(currentIndex, Qt::UserRole).toInt();
 
     auto addresses = m_live_callstack_by_type_model.get_addresses(currentIndex);
     if (addresses == nullptr)
@@ -517,6 +564,12 @@ void main_window::onTypeFilterChanged(QString filter)
 void main_window::onCallstackFilterChanged(QString filter)
 {
     m_live_callstack_by_type_filter_model.setFilterWildcard(filter);
+}
+
+void main_window::onReferenceExpanded(QModelIndex index)
+{
+    m_object_references_tree_model.expand(index);
+    m_ui->objectReferences->doItemsLayout();
 }
 
 bool main_window::eventFilter(QObject* object, QEvent* event)
@@ -701,6 +754,19 @@ void main_window::findObjectsReferences(const std::vector<uint64_t>& addresses)
     m_ui->tabWidget->setCurrentIndex(1);
     m_client.find_objects_references(addresses, [this](const std::vector<uint64_t>& addresses, std::string error, const std::vector<owlcat::object_references_t>& result) -> void
         {
+/*FILE* f = fopen("test.fr", "w");
+fprintf(f, "%I64u\n", addresses.size());
+for(auto& a : addresses)
+    fprintf(f, "\t%I64u\n", a);
+fprintf(f, "%I64u\n", result.size());
+for (auto& r : result)
+{
+    fprintf(f, "\t%I64u \"%s\"\n", r.address, r.type.c_str());
+    fprintf(f, "\t\t%I64u\n", r.parents.size());
+    for(auto& p : r.parents)
+        fprintf(f, "\t\t\t%I64u\n", p.address);
+}
+fclose(f);*/
             m_object_references_tree_model.update(error, addresses, result);
         });
 }

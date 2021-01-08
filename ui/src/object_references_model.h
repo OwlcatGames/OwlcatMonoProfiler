@@ -17,6 +17,9 @@ class object_references_tree_model : public QAbstractItemModel
             addresses.push_back(_addr);
         }
 
+        // If node already was expanded once and doesn't need to add its children
+        bool was_expanded = false;
+
         // All addresses that share this node
         std::vector<uint64_t> addresses;
         // Type of object
@@ -26,23 +29,25 @@ class object_references_tree_model : public QAbstractItemModel
 
         // Children of object
         std::vector<std::shared_ptr<tree_node_t>> children;        
-    };
+    };    
+
+    // Saved list of references
+    std::vector<owlcat::object_references_t> m_references;
 
     // Root objects (objects for which we searched)
     std::vector< std::shared_ptr<tree_node_t>> m_roots;
-    // Total nodes count for sanity checks
-    int m_nodes_count = 0;
 
-    void add_node(const std::vector<owlcat::object_references_t>& references, const owlcat::object_references_t& ref, tree_node_t* parent);
+    void add_node(const std::vector<owlcat::object_references_t>& references, const owlcat::object_references_t& ref, tree_node_t* parent, int depth);
     void clear();
 
     Q_OBJECT
 public slots:
     void update(std::string error, std::vector<uint64_t> addresses, std::vector<owlcat::object_references_t> references);
+    void expand(QModelIndex index);
 
     QModelIndex index(int row, int column, const QModelIndex& parent = QModelIndex()) const override;
     QModelIndex parent(const QModelIndex& index) const override;
     int rowCount(const QModelIndex& index) const override;
     int columnCount(const QModelIndex& index) const override;
-    QVariant data(const QModelIndex& index, int role) const override;
+    QVariant data(const QModelIndex& index, int role) const override;    
 };

@@ -67,10 +67,11 @@ public slots:
     void onLiveObjectTypeSelected(const QItemSelection& selected, const QItemSelection& deselected);
     void onPickerChanged(const QPolygon& selection);
     void onLiveObjectsCallstacksContextMenuRequested(QPoint point);
-    void onCallstackMenuAction(bool);
+    void onCallstackMenuAction(bool state);
     void onPauseApp(bool);
     void onTypeFilterChanged(QString filter);
     void onCallstackFilterChanged(QString filter);
+    void onReferenceExpanded(QModelIndex index);
 
 private:
     bool eventFilter(QObject* object, QEvent* event) override;

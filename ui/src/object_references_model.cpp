@@ -1,6 +1,6 @@
 #include "object_references_model.h"
 
-void object_references_tree_model::add_node(const std::vector<owlcat::object_references_t>& references, const owlcat::object_references_t& ref, tree_node_t* parent)
+void object_references_tree_model::add_node(const std::vector<owlcat::object_references_t>& references, const owlcat::object_references_t& ref, tree_node_t* parent, int depth)
 {
 	auto& children = parent ? parent->children : m_roots;
 
@@ -10,13 +10,6 @@ void object_references_tree_model::add_node(const std::vector<owlcat::object_ref
 	auto type_iter = std::find_if(children.begin(), children.end(), [&](auto node) {return node->type == ref.type; });
 	if (type_iter == children.end())
 	{
-		++m_nodes_count;
-		if (m_nodes_count > 1000)
-		{
-			children.push_back(std::make_shared<tree_node_t>(0, "...Too much references...", parent));
-			return;
-		}
-
 		children.push_back(std::make_shared<tree_node_t>(ref.address, ref.type, parent));
 		new_node = children.back().get();
 	}
@@ -26,22 +19,19 @@ void object_references_tree_model::add_node(const std::vector<owlcat::object_ref
 		new_node = (*type_iter).get();
 	}
 
-	// Prevent endless recursion on cyclical references
-	if (ref.visited)
-		return;
-
-	ref.visited = true;
-	for (auto& ref_parent : ref.parents)
+	if (depth == 0)
 	{
-		auto ref_iter = std::find_if(references.begin(), references.end(), [&](auto& r) {return r.address == ref_parent.address; });
-		if (ref_iter == references.end())
+		for (auto& ref_parent : ref.parents)
 		{
-			// This should not happen, but does. It means that some object in references was not reported correctly?
-			continue;
+			auto ref_iter = std::find_if(references.begin(), references.end(), [&](auto& r) {return r.address == ref_parent.address; });
+			if (ref_iter == references.end())
+			{
+				// This should not happen, but does. It means that some object in references was not reported correctly?
+				continue;
+			}
+			add_node(references, *ref_iter, new_node, depth + 1);
 		}
-		add_node(references , *ref_iter, new_node);
 	}
-	ref.visited = false;
 }
 
 void object_references_tree_model::clear()
@@ -53,7 +43,7 @@ void object_references_tree_model::clear()
 
 void object_references_tree_model::update(std::string error, std::vector<uint64_t> addresses, std::vector<owlcat::object_references_t> references)
 {
-	m_nodes_count = 0;
+	m_references = references;
 
 	beginResetModel();
 
@@ -64,11 +54,49 @@ void object_references_tree_model::update(std::string error, std::vector<uint64_
 		auto ref_iter = std::find_if(references.begin(), references.end(), [&](auto& r) {return r.address == root; });
 		if (ref_iter != references.end())
 		{
-			add_node(references, *ref_iter, nullptr);
+			add_node(references, *ref_iter, nullptr, 0);
 		}
 	}
 
 	endResetModel();
+}
+
+void object_references_tree_model::expand(QModelIndex index)
+{
+	auto this_node = (tree_node_t*)index.internalPointer();
+	if (this_node == nullptr)
+		return;
+
+	if (this_node->was_expanded)
+		return;
+	
+	for(int row = 0; row < this_node->children.size(); ++row)
+	{
+		auto& child = this_node->children[row];		
+
+		if (child->was_expanded)
+			continue;
+
+		for (auto& child_addr : child->addresses)
+		{
+			auto ref_iter = std::find_if(m_references.begin(), m_references.end(), [&](auto& r) {return r.address == child_addr; });
+			if (ref_iter == m_references.end())
+				continue;
+
+			for (auto& ref_parent : ref_iter->parents)
+			{
+				auto ref_parent_iter = std::find_if(m_references.begin(), m_references.end(), [&](auto& r) {return r.address == ref_parent.address; });
+				if (ref_parent_iter != m_references.end())
+				{
+					add_node(m_references, *ref_parent_iter, child.get(), 1);
+				}
+			}
+		}		
+		beginInsertRows(this->index(row, 0, index), 0, child->children.size());
+		endInsertRows();
+	}
+
+	this_node->was_expanded = true;
 }
 
 QModelIndex object_references_tree_model::index(int row, int column, const QModelIndex& parent) const
