@@ -157,7 +157,6 @@ namespace owlcat
 				m_events_sink->report_free(item.frame, addr, addr_iter->second.size);
 				m_freed += addr_iter->second.size;
 				auto& alloc = alloc_value(addr_iter);
-				alloc.allocated = true;
 				alloc.size = item.size;
 			}
 
@@ -254,7 +253,7 @@ namespace owlcat
 		for (auto iter = m_allocations.begin(); iter != m_allocations.end(); ++iter)
 		{
 			auto& alloc = alloc_value(iter);
-			alloc.allocated = false;
+			alloc.reset_flag(alloc_info::flag::TMP_ALLOCATED);
 			alloc.parents.clear();
 #ifdef DEBUG_ALLOCS
 			iter.second.parent = nullptr;
@@ -272,9 +271,9 @@ namespace owlcat
 				if (ref != 0)
 				{
 					auto iter = m_allocations.find(ref);
-					if (iter != m_allocations.end() && !iter->second.allocated)
+					if (iter != m_allocations.end() && !iter->second.flag(alloc_info::flag::TMP_ALLOCATED))
 					{
-						alloc_value(iter).allocated = true;
+						alloc_value(iter).set_flag(alloc_info::flag::TMP_ALLOCATED);
 						m_stack.push_back({ alloc_key(iter), &alloc_value(iter) });
 					}
 				}
@@ -307,9 +306,9 @@ namespace owlcat
 				{
 					auto& alloc = alloc_value(iter);
 					alloc.parents.push_back(entry.addr);
-					if (!iter->second.allocated)
+					if (!iter->second.flag(alloc_info::flag::TMP_ALLOCATED))
 					{
-						alloc.allocated = true;
+						alloc.set_flag(alloc_info::flag::TMP_ALLOCATED);
 #ifdef DEBUG_ALLOCS
 						iter->second.parent = entry.info;
 #endif
@@ -327,7 +326,7 @@ namespace owlcat
 			// 3. Forget all unmarked objects
 			for (auto iter = m_allocations.begin(); iter != m_allocations.end(); )
 			{
-				if (!iter->second.allocated)
+				if (!iter->second.flag(alloc_info::flag::TMP_ALLOCATED))
 				{
 					work_item item;
 					item.type = work_item_type::free;
@@ -359,7 +358,7 @@ namespace owlcat
 		// Clear all objects' marks
 		for (auto iter : m_allocations)
 		{
-			iter.second.allocated = false;
+			iter.second.reset_flag(alloc_info::flag::TMP_ALLOCATED);
 		}
 
 		auto state = begin_liveness_calculation(nullptr, 1024 * 1024, [](void* arr, int size, void* callback_userdata)
@@ -371,7 +370,7 @@ namespace owlcat
 					auto obj = objs[i];
 					auto iter = allocations.find((uint64_t)obj);
 					if (iter != allocations.end())
-						iter->second.allocated = true;
+						iter->second.set_flag(alloc_info::flag::TMP_ALLOCATED);
 				}
 			}, & m_allocations, []() {}, []() {});
 		calculate_liveness_from_statics(state);
@@ -379,7 +378,7 @@ namespace owlcat
 
 		for (auto iter = m_allocations.begin(); iter != m_allocations.end(); )
 		{
-			if (!iter->second.allocated)
+			if (!iter->second.flag(alloc_info::flag::TMP_ALLOCATED))
 			{
 				m_events_sink->report_free(frame, iter->first, iter->second.size);				
 				auto iter2 = iter;
@@ -449,9 +448,13 @@ namespace owlcat
 				for (auto& parent : iter->second.parents)
 				{
 					// Check if we already have information about this object. It would be faster to mark the object somehow, but we don't want to spare the memory
-					auto check_iter = std::find_if(filtered_results.begin(), filtered_results.end(), [&](auto& r) {return r.addr == parent; });
-					if (check_iter == filtered_results.end())
-						interesting_addresses.push_back(parent);
+					auto check_iter = m_allocations.find(parent);
+					if (check_iter != m_allocations.end() && alloc_value(check_iter).flag(alloc_info::flag::TMP_VISITED))
+						continue;
+
+					alloc_value(check_iter).set_flag(alloc_info::flag::TMP_VISITED);
+
+					interesting_addresses.push_back(parent);
 				}
 			}
 		}

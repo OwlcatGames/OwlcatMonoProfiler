@@ -195,9 +195,8 @@ namespace owlcat
 		{
 			// Allocation size
 			uint32_t size;
-			// Temporary flag used by GC. We can merge it with size and save some space, but I'm planning
-			// on storing more flags in a bit mask later
-			bool allocated;
+			// A set of flags, temporary and permanent for this allocation
+			uint8_t flags;
 			// List of objects that refer to this allocation.
 			// TODO: Optimize this, it takes about 30 bytes even when empty, and a lot of objects only have 1 or 2 references
 			std::vector<uint64_t, counting_allocator<uint64_t>> parents;
@@ -206,6 +205,17 @@ namespace owlcat
 			struct alloc_info* parent = 0;
 			bool reallocated = false;
 #endif
+
+			enum class flag : uint8_t
+			{
+				TMP_ALLOCATED = 1 << 0,
+				TMP_VISITED   = 1 << 1,
+				IGNORE_IN_GC  = 1 << 2,
+			};
+
+			void set_flag(flag f) { flags |= (uint8_t)f; }
+			void reset_flag(flag f) { flags &= ~(uint8_t)f; }
+			bool flag(flag f) { return (flags & (uint8_t)f) != 0; }
 		};
 
 		//using allocations_map = tsl::sparse_map<uint64_t, alloc_info, std::hash<uint64_t>, std::equal_to<uint64_t>, counting_allocator<std::pair<uint64_t, alloc_info>>>;
