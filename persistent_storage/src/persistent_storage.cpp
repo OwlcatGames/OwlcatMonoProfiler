@@ -513,6 +513,15 @@ void cursor::populate_columns() const
             m_details->m_columns.push_back({ column_name, column_type, {} });
         }
     }
+    else // Update column types every time because they can change (e.g. NULL column can become non-NULL, and type is take from the current row's value :( )
+    {
+        for (int i = 0; i < sqlite3_column_count(m_details->m_stmt); ++i)
+        {
+            auto column_type = sqlite3_column_type(m_details->m_stmt, i);
+
+            m_details->m_columns[i].type = column_type;
+        }
+    }
 
     for(int i = 0; i < sqlite3_column_count(m_details->m_stmt); ++i)
     {

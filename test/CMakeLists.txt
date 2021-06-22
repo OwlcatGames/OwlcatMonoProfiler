@@ -9,11 +9,11 @@ project( owlcat_mono_profiler_test CXX )
 set( SOURCES_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/src )
 
 if ("${MONO_DLL_PATH}" STREQUAL "")
-	message(FATAL_ERROR "MONO_DLL_PATH not set. Test won't be run")
+	message("MONO_DLL_PATH not set. Test won't be run")
 endif()
 
 if (NOT EXISTS "${MONO_DLL_PATH}")
-	message(FATAL_ERROR "MONO_DLL_PATH does not points to an existing file")
+	message("MONO_DLL_PATH does not points to an existing file")
 endif()
 
 file(TO_CMAKE_PATH "${MONO_DLL_PATH}" MONO_DLL_PATH)
