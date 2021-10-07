@@ -19,6 +19,7 @@ namespace owlcat
         query_id_t id_select_types = "select_types";
         query_id_t id_select_callstacks = "select_callstacks";
         query_id_t id_select_last_good_size = "select_last_good_size";
+        query_id_t id_select_allocation_type_and_stack = "select_allocation_type_and_stack";
 
         bool insert_alloc_event(db_t& db, uint64_t frame, uint64_t addr, uint64_t size, uint64_t type_id, uint64_t callstack_id)
         {
@@ -115,6 +116,11 @@ namespace owlcat
             return db.query_data(queries::id_select_last_good_size, { {"from", from_frame} });
         }
 
+        cursor_t select_allocation_type_and_stack(db_t& db, uint64_t address)
+        {
+            return db.query_data(queries::id_select_allocation_type_and_stack, { {"address", address} });
+        }
+
         bool register_queries(persistent_storage::persistent_storage& db)
         {
             if (!db.is_open())
@@ -148,6 +154,11 @@ namespace owlcat
                 "SELECT size "
                 "FROM FrameStats "
                 "WHERE frame <= $from ORDER BY frame DESC LIMIT 1"
+            );
+            register_query(queries::id_select_allocation_type_and_stack,
+                "SELECT type_id, callstack_id "
+                "FROM ProfilerEvents "
+                "WHERE event_type_id=1 AND address=$address ORDER BY frame DESC LIMIT 1"
             );
 
             register_query(queries::id_insert_alloc_event,

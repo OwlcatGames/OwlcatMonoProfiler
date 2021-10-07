@@ -68,6 +68,19 @@ namespace owlcat
                 },
             }
         },
+        ////----------------------------------------------------------------
+        //// This speeds up Go To Callstack significantly, but slows down
+        //// insertation too much. Investigate a better way
+        //{
+        //    "Create index on addresses",
+        //    {
+        //        {
+        //            "CREATE INDEX address_index ON ProfilerEvents("
+        //            "    address ASC"
+        //            ");"
+        //        },
+        //    }
+        //},
     };
 
     // Important: queries are not registred before this call, so we can't use named queries here, unless we register them ourselves

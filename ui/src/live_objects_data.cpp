@@ -1,6 +1,24 @@
 #include "live_objects_data.h"
 #include "common_ui.h"
 
+bool live_objects_data::export_to_csv(const std::string& file)
+{
+    FILE* f = fopen(file.c_str(), "w");
+    if (f == nullptr)
+        return false;
+
+    fprintf(f, "Type;Count;Size\n");
+
+    for (auto& t : types)
+    {
+        fprintf(f, "\"%s\";%I64u;%I64u\n", m_data->get_type_name(t.type), t.count, t.size);
+    }
+
+    fclose(f);
+
+    return true;
+}
+
 void live_objects_by_type_model::init(live_objects_data* data)
 {
     m_data = data;
@@ -127,6 +145,17 @@ void live_objects_by_type_model::clear()
     m_rows.clear();
     endRemoveRows();
     emit dataChanged(QModelIndex(), QModelIndex());
+}
+
+QModelIndex live_objects_by_type_model::find_type(uint64_t type) const
+{    
+    for (size_t i = 0; i < m_rows.size(); ++i)
+    {
+        if (m_rows[i].type == type)
+            return index(i, 0);
+    }
+
+    return QModelIndex();
 }
 
 void live_callstacks_by_type_model::init(live_objects_data* data)
@@ -260,6 +289,17 @@ void live_callstacks_by_type_model::clear()
     m_rows.clear();
     endRemoveRows();
     emit dataChanged(QModelIndex(), QModelIndex());
+}
+
+QModelIndex live_callstacks_by_type_model::find_callstack(uint64_t callstack) const
+{
+    for (size_t i = 0; i < m_rows.size(); ++i)
+    {
+        if (m_rows[i].callstack == callstack)
+            return index(i, 0);
+    }
+
+    return QModelIndex();
 }
 
 const std::vector<uint64_t>* live_callstacks_by_type_model::get_addresses(const QModelIndex& index)

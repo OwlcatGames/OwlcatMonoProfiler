@@ -32,12 +32,12 @@ class object_references_tree_model : public QAbstractItemModel
     };    
 
     // Saved list of references
-    std::vector<owlcat::object_references_t> m_references;
+    std::unordered_map<uint64_t, owlcat::object_references_t> m_references;
 
     // Root objects (objects for which we searched)
     std::vector< std::shared_ptr<tree_node_t>> m_roots;
 
-    void add_node(const std::vector<owlcat::object_references_t>& references, const owlcat::object_references_t& ref, tree_node_t* parent, int depth);
+    void add_node(const std::unordered_map<uint64_t, owlcat::object_references_t>& references, const owlcat::object_references_t& ref, tree_node_t* parent, int depth);
     void clear();
 
     Q_OBJECT
@@ -49,5 +49,6 @@ public slots:
     QModelIndex parent(const QModelIndex& index) const override;
     int rowCount(const QModelIndex& index) const override;
     int columnCount(const QModelIndex& index) const override;
-    QVariant data(const QModelIndex& index, int role) const override;    
+    QVariant data(const QModelIndex& index, int role) const override;
+    std::vector<uint64_t> get_addresses(const QModelIndex& index) const;
 };

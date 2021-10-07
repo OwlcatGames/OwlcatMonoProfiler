@@ -135,6 +135,8 @@ main_window::main_window(QWidget* parent) :
 
     m_ui->setupUi(this);
 
+    // --------- Progress bars ---------
+
     m_live_objects_types_progress.reset(new QProgressBar());
     m_live_objects_types_progress->setAlignment(Qt::AlignCenter);
     m_live_objects_types_progress_layout.reset(new QHBoxLayout(m_ui->liveObjectsList));
@@ -150,6 +152,13 @@ main_window::main_window(QWidget* parent) :
     m_live_objects_callstacks_progress_layout->addWidget(m_live_objects_callstacks_progress.data());
     m_live_objects_callstacks_progress_layout->addSpacing(100);
     m_live_objects_callstacks_progress->setVisible(false);
+
+    connect(this, SIGNAL(onLiveObjectTypesProgressChanged(int)), m_live_objects_types_progress.get(), SLOT(setValue(int)), Qt::ConnectionType::QueuedConnection);
+    connect(this, SIGNAL(onLiveObjectTypesProgressInitiated(int, int)), m_live_objects_types_progress.get(), SLOT(setRange(int, int)), Qt::ConnectionType::QueuedConnection);
+    connect(this, SIGNAL(onLiveObjectCallstacksProgressChanged(int)), m_live_objects_callstacks_progress.get(), SLOT(setValue(int)), Qt::ConnectionType::QueuedConnection);
+    connect(this, SIGNAL(onLiveObjectCallstacksProgressInitiated(int, int)), m_live_objects_callstacks_progress.get(), SLOT(setRange(int, int)), Qt::ConnectionType::QueuedConnection);
+
+    // --------- Pickers ---------
 
     m_allocations_picker = std::make_shared<band_picker>(m_ui->allocationsGraph->canvas());
     m_size_picker = std::make_shared<band_picker>(m_ui->sizeGraph->canvas());
@@ -167,6 +176,11 @@ main_window::main_window(QWidget* parent) :
     m_sizeZone.attach(m_ui->sizeGraph);
     m_sizeZone.setOrientation(Qt::Vertical);
     m_sizeZone.setZ(100);
+
+    connect(m_allocations_picker.get(), SIGNAL(selected(const QPolygon)), this, SLOT(onPickerChanged(const QPolygon)));
+    connect(m_size_picker.get(), SIGNAL(selected(const QPolygon)), this, SLOT(onPickerChanged(const QPolygon)));
+
+    // --------- Graphs ---------
 
     m_ui->allocationsGraph->setAutoReplot(true);
     //TODO: Scale without scientific notation
@@ -186,6 +200,8 @@ main_window::main_window(QWidget* parent) :
     m_size_chart.setStyle(QwtPlotCurve::Lines);
     m_size_chart.setPen(QColor::fromRgb(0, 0, 0));
 
+    // --------- Live objects tab ---------
+
     m_live_object_by_type_filter_model.setSourceModel(&m_live_objects_by_type_model);
     m_live_object_by_type_filter_model.setFilterKeyColumn(0);
     m_live_object_by_type_filter_model.setFilterCaseSensitivity(Qt::CaseInsensitive);
@@ -199,19 +215,35 @@ main_window::main_window(QWidget* parent) :
     m_ui->callstacksList->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     connect(m_ui->liveObjectsList->selectionModel(), SIGNAL(selectionChanged(QItemSelection, QItemSelection)), this, SLOT(onLiveObjectTypeSelected(QItemSelection, QItemSelection)));
 
-    connect(m_allocations_picker.get(), SIGNAL(selected(const QPolygon)), this, SLOT(onPickerChanged(const QPolygon)));
-    connect(m_size_picker.get(), SIGNAL(selected(const QPolygon)), this, SLOT(onPickerChanged(const QPolygon)));
-    
-    connect(this, SIGNAL(onLiveObjectTypesProgressChanged(int)), m_live_objects_types_progress.get(), SLOT(setValue(int)), Qt::ConnectionType::QueuedConnection);
-    connect(this, SIGNAL(onLiveObjectTypesProgressInitiated(int, int)), m_live_objects_types_progress.get(), SLOT(setRange(int, int)), Qt::ConnectionType::QueuedConnection);
-    connect(this, SIGNAL(onLiveObjectCallstacksProgressChanged(int)), m_live_objects_callstacks_progress.get(), SLOT(setValue(int)), Qt::ConnectionType::QueuedConnection);
-    connect(this, SIGNAL(onLiveObjectCallstacksProgressInitiated(int, int)), m_live_objects_callstacks_progress.get(), SLOT(setRange(int, int)), Qt::ConnectionType::QueuedConnection);
+    // --------- Object references tab ---------
 
+    test_references_tree(m_object_references_tree_model);
+    m_ui->objectReferences->setModel(&m_object_references_tree_model);
+
+    // --------- Search results tab ---------
+
+    m_search_results_types_filter_model.setSourceModel(&m_search_results_types_model);
+    m_search_results_types_filter_model.setFilterKeyColumn(0);
+    m_search_results_types_filter_model.setFilterCaseSensitivity(Qt::CaseInsensitive);
+    m_ui->searchTypesList->setModel(&m_search_results_types_filter_model);
+
+    m_search_results_callstacks_filter_model.setSourceModel(&m_search_results_callstacks_model);
+    m_search_results_callstacks_filter_model.setFilterKeyColumn(0);
+    m_search_results_callstacks_filter_model.setFilterCaseSensitivity(Qt::CaseInsensitive);
+    m_ui->searchCallstacksList->setModel(&m_search_results_callstacks_filter_model);
+
+    m_ui->searchCallstacksList->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    connect(m_ui->searchTypesList->selectionModel(), SIGNAL(selectionChanged(QItemSelection, QItemSelection)), this, SLOT(onSearchTypeSelected(QItemSelection, QItemSelection)));
+
+    // --------- ---------
+    
     m_ui->allocationsGraph->installEventFilter(this);
     m_ui->sizeGraph->installEventFilter(this);
 
     m_ui->allocationsGraph->axisScaleDraw(QwtPlot::yLeft)->setMinimumExtent(100);
     m_ui->sizeGraph->axisScaleDraw(QwtPlot::yLeft)->setMinimumExtent(100);
+
+    // --------- Context menus ---------
 
     m_ui->callstacksList->setContextMenuPolicy(Qt::CustomContextMenu);
     m_callstacksMenu.reset(new QMenu(this));
@@ -221,8 +253,17 @@ main_window::main_window(QWidget* parent) :
     
     connect(this, SIGNAL(onObjectReferencesFound(std::string, std::vector<uint64_t>, std::vector<owlcat::object_references_t>)), &m_object_references_tree_model, SLOT(update(std::string, std::vector<uint64_t>, std::vector<owlcat::object_references_t>)));
 
-    //test_references_tree(m_object_references_tree_model);
-    m_ui->objectReferences->setModel(&m_object_references_tree_model);    
+    m_ui->objectReferences->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_referencesMenu.reset(new QMenu(this));
+    m_referencesMenu->addAction(new QAction("Go to callstack", this));
+
+    connect(m_referencesMenu->actions()[0], SIGNAL(triggered(bool)), this, SLOT(onReferencesMenuAction(bool)));
+
+    m_ui->liveObjectsList->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_liveObjectsMenu.reset(new QMenu(this));
+    m_liveObjectsMenu->addAction(new QAction("Export to CSV", this));
+
+    connect(m_liveObjectsMenu->actions()[0], SIGNAL(triggered(bool)), this, SLOT(onTypesMenuAction(bool)));
 }
 
 main_window::~main_window()
@@ -247,30 +288,34 @@ void main_window::onOpenData()
         QDir::currentPath(),
         tr("Owl Traces (*.owl)"));
 
-    if (!file_name.isEmpty())
+    if (file_name.isEmpty())
+        return;
+    
+    if (!m_client.open_data(file_name.toStdString().c_str()))
     {
-        if (!m_client.open_data(file_name.toStdString().c_str()))
-        {
-            return;
-        }
-
-        m_is_db_temporary = false;
-
-        m_data->clear();
-        m_data->update_boundaries();
-
-        m_live_objects_data.init(m_client.get_data());
-        m_live_objects_by_type_model.init(&m_live_objects_data);
-        m_live_callstack_by_type_model.init(&m_live_objects_data);
-
-        m_ui->horizontalScrollBar->setMinimum(m_data->min_frame);
-        m_ui->horizontalScrollBar->setMaximum(m_data->max_frame);
-        m_ui->horizontalScrollBar->setSliderPosition(m_data->min_frame);
-        setZoom(1.0f);
-
-        m_ui->allocationsGraph->replot();
-        m_ui->sizeGraph->replot();
+        return;
     }
+
+    m_is_db_temporary = false;
+
+    m_data->clear();
+    m_data->update_boundaries();
+
+    m_live_objects_data.init(m_client.get_data());        
+    m_live_objects_by_type_model.init(&m_live_objects_data);
+    m_live_callstack_by_type_model.init(&m_live_objects_data);
+
+    m_search_results_data.init(m_client.get_data());
+    m_search_results_types_model.init(&m_search_results_data);
+    m_search_results_callstacks_model.init(&m_search_results_data);
+
+    m_ui->horizontalScrollBar->setMinimum(m_data->min_frame);
+    m_ui->horizontalScrollBar->setMaximum(m_data->max_frame);
+    m_ui->horizontalScrollBar->setSliderPosition(m_data->min_frame);
+    setZoom(1.0f);
+
+    m_ui->allocationsGraph->replot();
+    m_ui->sizeGraph->replot();
 }
 
 void main_window::onSaveData()
@@ -325,6 +370,10 @@ void main_window::onStartProfiling()
     m_live_objects_data.init(m_client.get_data());
     m_live_objects_by_type_model.init(&m_live_objects_data);
     m_live_callstack_by_type_model.init(&m_live_objects_data);
+
+    m_search_results_data.init(m_client.get_data());
+    m_search_results_types_model.init(&m_search_results_data);
+    m_search_results_callstacks_model.init(&m_search_results_data);
 
     m_ui->horizontalScrollBar->setMinimum(m_data->min_frame);
     m_ui->horizontalScrollBar->setMaximum(m_data->max_frame);
@@ -411,6 +460,10 @@ void main_window::onRunUnityApp()
     m_live_objects_data.init(m_client.get_data());
     m_live_objects_by_type_model.init(&m_live_objects_data);
     m_live_callstack_by_type_model.init(&m_live_objects_data);
+
+    m_search_results_data.init(m_client.get_data());
+    m_search_results_types_model.init(&m_search_results_data);
+    m_search_results_callstacks_model.init(&m_search_results_data);
 
     m_ui->horizontalScrollBar->setMinimum(m_data->min_frame);
     m_ui->horizontalScrollBar->setMaximum(m_data->max_frame);
@@ -503,6 +556,22 @@ void main_window::onLiveObjectTypeSelected(const QItemSelection& selected, const
     m_ui->callstacksList->sortByColumn(2, Qt::SortOrder::DescendingOrder);
 }
 
+void main_window::onSearchTypeSelected(const QItemSelection& selected, const QItemSelection& deselected)
+{
+    auto currentIndex = m_ui->searchTypesList->currentIndex();
+    if (currentIndex == QModelIndex())
+        return;
+
+    uint64_t type_id = m_search_results_types_filter_model.data(currentIndex, Qt::UserRole).toInt();
+
+    m_search_results_callstacks_model.update(type_id, nullptr);
+
+    m_ui->searchCallstacksList->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_ui->searchCallstacksList->horizontalHeader()->resizeSection(1, 100);
+    m_ui->searchCallstacksList->horizontalHeader()->resizeSection(2, 100);
+    m_ui->searchCallstacksList->sortByColumn(2, Qt::SortOrder::DescendingOrder);
+}
+
 void main_window::onPickerChanged(const QPolygon& selection)
 {    
     QRect rect(selection.first(), selection.last());
@@ -532,6 +601,21 @@ void main_window::onLiveObjectsCallstacksContextMenuRequested(QPoint point)
     m_callstacksMenu->popup(m_ui->callstacksList->viewport()->mapToGlobal(point));
 }
 
+void main_window::onReferencesContextMenuRequested(QPoint point)
+{
+    QModelIndex index = m_ui->objectReferences->indexAt(point);
+
+    if (index == QModelIndex())
+        return;
+
+    m_referencesMenu->popup(m_ui->objectReferences->viewport()->mapToGlobal(point));
+}
+
+void main_window::onLiveObjectsMenuRequested(QPoint point)
+{
+    m_liveObjectsMenu->popup(m_ui->liveObjectsList->viewport()->mapToGlobal(point));
+}
+
 void main_window::onCallstackMenuAction(bool state)
 {
     auto currentIndex = m_ui->callstacksList->currentIndex();
@@ -545,7 +629,27 @@ void main_window::onCallstackMenuAction(bool state)
     auto addresses = m_live_callstack_by_type_model.get_addresses(currentIndex);
     if (addresses == nullptr)
         return;
-    findObjectsReferences(*addresses);
+    auto addresses_truncated = *addresses;
+    findObjectsReferences(addresses_truncated);
+}
+
+void main_window::onReferencesMenuAction(bool state)
+{
+    auto currentIndex = m_ui->objectReferences->currentIndex();
+    if (currentIndex == QModelIndex())
+        return;
+
+    auto addresses = m_object_references_tree_model.get_addresses(currentIndex);
+    m_search_results_data.search_address_list(addresses, nullptr);
+    m_ui->tabWidget->setCurrentIndex(2);
+
+    m_search_results_types_model.update();
+    m_search_results_callstacks_model.clear();
+}
+
+void main_window::onTypesMenuAction(bool state)
+{
+    export_types_to_csv();
 }
 
 void main_window::onPauseApp(bool pause)
@@ -644,8 +748,8 @@ void main_window::closeEvent(QCloseEvent* ev)
 void main_window::setZoom(float new_zoom)
 {
     m_zoom = new_zoom;
-    if (m_zoom <= 0.1f)
-        m_zoom = 0.1f;
+    if (m_zoom <= 0.02f)
+        m_zoom = 0.02f;
     else if (m_zoom > 10.0f)
         m_zoom = 10.0f;
 
@@ -769,4 +873,19 @@ for (auto& r : result)
 fclose(f);*/
             m_object_references_tree_model.update(error, addresses, result);
         });
+}
+
+void main_window::export_types_to_csv()
+{
+    QString file_name = QFileDialog::getSaveFileName(this, tr("Export to CSV"),
+        QDir::currentPath(),
+        tr("CSV files (*.csv)"));
+
+    if (file_name.isEmpty())
+        return;
+
+    if (!m_live_objects_data.export_to_csv(file_name.toStdString()))
+    {
+        QMessageBox::critical(nullptr, "Error", "Failed to save types to CSV", QMessageBox::Ok);
+    }
 }

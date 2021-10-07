@@ -32,6 +32,7 @@ namespace owlcat
         cursor_t select_types(db_t& db);
         cursor_t select_callstacks(db_t& db);
         cursor_t select_last_good_size(db_t& db, uint64_t from_frame);
+        cursor_t select_allocation_type_and_stack(db_t& db, uint64_t address);
 
         bool register_queries(persistent_storage::persistent_storage& db);
     }

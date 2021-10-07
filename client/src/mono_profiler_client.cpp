@@ -688,6 +688,18 @@ namespace owlcat
 			return m_id_to_callstacks_map.size();
 		}
 
+		bool get_allocation_type_and_stack(uint64_t address, uint64_t& type_id, uint64_t& stack_id)
+		{
+			auto result_cursor = queries::select_allocation_type_and_stack(m_db, address);
+			if (result_cursor.has_error() || !result_cursor.next())
+				return false;
+
+			type_id = result_cursor.get_uint64("type_id");
+			stack_id = result_cursor.get_uint64("callstack_id");
+
+			return true;
+		}
+
 public:
 		void get_frame_boundaries(uint64_t& min, uint64_t& max)
 		{
@@ -954,5 +966,10 @@ public:
 	size_t mono_profiler_client_data::get_callstacks_count() const
 	{
 		return m_source->get_callstacks_count();
+	}
+
+	bool mono_profiler_client_data::get_allocation_type_and_stack(uint64_t address, uint64_t& type_id, uint64_t& stack_id) const
+	{
+		return m_source->get_allocation_type_and_stack(address, type_id, stack_id);
 	}
 }

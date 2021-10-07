@@ -6,9 +6,9 @@
 #include "mono_profiler_client.h"
 
 /*
-    A base class that provides data for models used by live objects lists
+    A base class that provides data for models used by search results lists
 */
-struct live_objects_data
+struct search_results_data
 {
 private:
     owlcat::mono_profiler_client_data* m_data = nullptr;
@@ -16,18 +16,16 @@ private:
 public:
     void init(owlcat::mono_profiler_client_data* data);
 
-    void update(uint64_t from_frame, uint64_t to_frame, owlcat::progress_func_t progress_func);
+    void search_address_list(const std::vector<uint64_t>& addresses, owlcat::progress_func_t progress_func);
 
     const char* get_type_name(uint64_t type_id) const { return m_data->get_type_name(type_id); }
     const char* get_callstack(uint64_t callstack_id) const { return m_data->get_callstack(callstack_id); }
 
-    bool export_to_csv(const std::string& file);
-
     struct callstack_data
     {
         uint64_t callstack;
-        uint64_t count;
-        uint64_t size;
+        //uint64_t count;
+        //uint64_t size;
 
         std::vector<uint64_t> addresses;
     };
@@ -35,8 +33,8 @@ public:
     struct type_data
     {
         uint64_t type;
-        uint64_t count;
-        uint64_t size;
+        //uint64_t count;
+        //uint64_t size;
 
         std::vector<callstack_data> callstacks;
     };
@@ -44,47 +42,46 @@ public:
 };
 
 /*
-    Model used by "live objects by type" list
+    Model used by "search result types" list
 */
-class live_objects_by_type_model : public QAbstractTableModel
+class search_results_types_model : public QAbstractTableModel
 {
-    live_objects_data* m_data = nullptr;
+    search_results_data* m_data = nullptr;
     struct row_data
     {
         uint64_t type;
-        uint64_t count;
-        uint64_t size;
+        //uint64_t count;
+        //uint64_t size;
     };
     std::vector<row_data> m_rows;
-    uint64_t m_total_size = 0;
+    //uint64_t m_total_size = 0;
 
 public:
     enum role
     {
         Type = Qt::UserRole + 0,
-        Size = Qt::UserRole + 1,
+        //Size = Qt::UserRole + 1,
     };
 
 public:
-    void init(live_objects_data* data);
+    void init(search_results_data* data);
 
     int rowCount(const QModelIndex& index) const override;
     int columnCount(const QModelIndex& index) const override;
     QVariant data(const QModelIndex& index, int role) const override;
     QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override;
-    void sort(int column, Qt::SortOrder order = Qt::AscendingOrder) override;    
+    void sort(int column, Qt::SortOrder order = Qt::AscendingOrder) override;
 
     void update();
     void clear();
 
-    uint64_t get_total_size() const { return m_total_size; }
-    QModelIndex find_type(uint64_t type) const;
+    //uint64_t get_total_size() const { return m_total_size; }
 };
 
 /*
     Model used by "live objects by callstack for type" list
 */
-class live_callstacks_by_type_model : public QAbstractTableModel
+class search_results_callstacks_model : public QAbstractTableModel
 {
 public:
     enum role
@@ -93,18 +90,18 @@ public:
     };
 
 private:
-    live_objects_data* m_data;
+    search_results_data* m_data;
     struct row_data
     {
         uint64_t callstack;
-        uint64_t count;
-        uint64_t size;
+        //uint64_t count;
+        //uint64_t size;
 
         std::vector<uint64_t> addresses;
     };
     std::vector<row_data> m_rows;
 public:
-    void init(live_objects_data* data);
+    void init(search_results_data* data);
 
     int rowCount(const QModelIndex& index) const override;
     int columnCount(const QModelIndex& index) const override;
@@ -114,8 +111,6 @@ public:
 
     void update(uint64_t type, std::function<void(size_t cur, size_t max)> callback);
     void clear();
-
-    QModelIndex find_callstack(uint64_t callstack) const;
 
     const std::vector<uint64_t>* get_addresses(const QModelIndex& index);
 };

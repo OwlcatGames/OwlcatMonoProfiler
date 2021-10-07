@@ -254,6 +254,8 @@ namespace owlcat
 		{
 			auto& alloc = alloc_value(iter);
 			alloc.reset_flag(alloc_info::flag::TMP_ALLOCATED);
+			alloc.reset_flag(alloc_info::flag::IS_ROOT);
+			alloc.reset_flag(alloc_info::flag::TMP_VISITED);
 			alloc.parents.clear();
 #ifdef DEBUG_ALLOCS
 			iter.second.parent = nullptr;
@@ -273,6 +275,7 @@ namespace owlcat
 					auto iter = m_allocations.find(ref);
 					if (iter != m_allocations.end() && !iter->second.flag(alloc_info::flag::TMP_ALLOCATED))
 					{
+						alloc_value(iter).set_flag(alloc_info::flag::IS_ROOT);
 						alloc_value(iter).set_flag(alloc_info::flag::TMP_ALLOCATED);
 						m_stack.push_back({ alloc_key(iter), &alloc_value(iter) });
 					}
@@ -308,6 +311,7 @@ namespace owlcat
 					alloc.parents.push_back(entry.addr);
 					if (!iter->second.flag(alloc_info::flag::TMP_ALLOCATED))
 					{
+						alloc.reset_flag(alloc_info::flag::IS_ROOT);
 						alloc.set_flag(alloc_info::flag::TMP_ALLOCATED);
 #ifdef DEBUG_ALLOCS
 						iter->second.parent = entry.info;
@@ -441,6 +445,10 @@ namespace owlcat
 
 				filtered_results.push_back({ iter->first, {} });
 				filtered_results.back().type = full_name;
+				if (iter->second.flag(alloc_info::flag::IS_ROOT))
+					filtered_results.back().type += " (Root)";
+				if (!iter->second.flag(alloc_info::flag::TMP_ALLOCATED))
+					filtered_results.back().type += " (Deleted)";
 				filtered_results.back().parents.resize(iter->second.parents.size());
 				memcpy(filtered_results.back().parents.data(), iter->second.parents.data(), sizeof(uint64_t) * iter->second.parents.size());
 

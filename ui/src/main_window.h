@@ -9,12 +9,14 @@
 #include "qwt_plot_histogram.h"
 #include "qwt_plot_curve.h"
 #include "qwt_plot_zoneitem.h"
+#include "qwt_plot_marker.h"
 
 #include "mono_profiler_client.h"
 #include "band_picker.h"
 #include "byte_scale_draw.h"
 #include "graphs_data.h"
 #include "live_objects_data.h"
+#include "search_results_data.h"
 #include "object_references_model.h"
 
 namespace Ui {
@@ -43,6 +45,19 @@ public:
     }
 };
 
+class markers
+{
+private:
+    std::vector<std::shared_ptr<QwtPlotMarker>> m_pool;
+    std::vector<std::shared_ptr<QwtPlotMarker>> m_active_markers;
+
+public:
+    void update(std::vector<QPointF> points)
+    {
+
+    }
+};
+
 class main_window : public QMainWindow
 {
     Q_OBJECT
@@ -65,9 +80,14 @@ public slots:
     void onStopProfiling();
     void onAllocationsScrolled(int);    
     void onLiveObjectTypeSelected(const QItemSelection& selected, const QItemSelection& deselected);
+    void onSearchTypeSelected(const QItemSelection& selected, const QItemSelection& deselected);
     void onPickerChanged(const QPolygon& selection);
     void onLiveObjectsCallstacksContextMenuRequested(QPoint point);
+    void onReferencesContextMenuRequested(QPoint point);
+    void onLiveObjectsMenuRequested(QPoint point);
     void onCallstackMenuAction(bool state);
+    void onReferencesMenuAction(bool state);
+    void onTypesMenuAction(bool state);
     void onPauseApp(bool);
     void onTypeFilterChanged(QString filter);
     void onCallstackFilterChanged(QString filter);
@@ -82,6 +102,7 @@ private:
     void updateLiveObjectsSelectedSize();
     bool trySaveUnsavedData();
     void findObjectsReferences(const std::vector<uint64_t>& addresses);
+    void export_types_to_csv();
     
     Ui::MainWindow* m_ui;
 
@@ -92,6 +113,8 @@ private:
 
     QwtPlotZoneItem m_allocationsZone;
     QwtPlotZoneItem m_sizeZone;
+
+    markers m_markers;
 
     QScopedPointer<QHBoxLayout> m_live_objects_types_progress_layout;
     QScopedPointer<QProgressBar> m_live_objects_types_progress;
@@ -105,6 +128,12 @@ private:
     filter_proxy_model m_live_callstack_by_type_filter_model;
     object_references_tree_model m_object_references_tree_model;
 
+    search_results_data m_search_results_data;
+    search_results_types_model m_search_results_types_model;
+    filter_proxy_model m_search_results_types_filter_model;
+    search_results_callstacks_model m_search_results_callstacks_model;
+    filter_proxy_model m_search_results_callstacks_filter_model;
+
     owlcat::mono_profiler_client m_client;
     std::shared_ptr<graphs_data> m_data;
 
@@ -112,6 +141,8 @@ private:
     QScopedPointer<QThread> m_callstacks_worker;
 
     QScopedPointer<QMenu> m_callstacksMenu;
+    QScopedPointer<QMenu> m_referencesMenu;
+    QScopedPointer<QMenu> m_liveObjectsMenu;
 
     float m_zoom = 1.0f;
     int m_pos = 0;

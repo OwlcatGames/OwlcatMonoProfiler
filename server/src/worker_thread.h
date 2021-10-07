@@ -210,7 +210,7 @@ namespace owlcat
 			{
 				TMP_ALLOCATED = 1 << 0,
 				TMP_VISITED   = 1 << 1,
-				IGNORE_IN_GC  = 1 << 2,
+				IS_ROOT		  = 1 << 2,
 			};
 
 			void set_flag(flag f) { flags |= (uint8_t)f; }

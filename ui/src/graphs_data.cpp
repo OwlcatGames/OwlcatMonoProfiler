@@ -103,3 +103,7 @@ uint64_t graphs_data::get_closest_gc_frame(uint64_t frame) const
     return f1;
 }
 
+bool graphs_data::get_allocation_type_and_stack(uint64_t address, uint64_t& type_id, uint64_t& stack_id)
+{
+    return m_data->get_allocation_type_and_stack(address, type_id, stack_id);
+}

@@ -28,6 +28,8 @@ set( ALL_SOURCES
     ${SOURCES_ROOT}/graphs_data.h
     ${SOURCES_ROOT}/live_objects_data.cpp
     ${SOURCES_ROOT}/live_objects_data.h
+    ${SOURCES_ROOT}/search_results_data.cpp
+    ${SOURCES_ROOT}/search_results_data.h
     ${SOURCES_ROOT}/object_references_model.cpp
     ${SOURCES_ROOT}/object_references_model.h
     ${SOURCES_ROOT}/common_ui.h

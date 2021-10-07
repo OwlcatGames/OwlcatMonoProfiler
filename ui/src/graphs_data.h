@@ -46,4 +46,7 @@ public:
 
     // Searches for a frame where there were any deallocations that is closest to the specified frame (for "Snap to GC" option)
     uint64_t get_closest_gc_frame(uint64_t frame) const;
+
+    bool get_allocation_type_and_stack(uint64_t address, uint64_t& type_id, uint64_t& stack_id);
+    //bool get_allocations_type_and_stack(const std::vector<uint64_t>& addresses, std::vector<owlcat::search_result_t>& results);
 };

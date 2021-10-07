@@ -27,6 +27,12 @@ namespace owlcat
 		std::vector<parent_info> parents;
 	};
 
+	struct search_result_t
+	{
+		uint64_t type_id;
+		std::vector<uint64_t> callstacks;
+	};
+
 	// Callbacks for commands
 	using find_references_callback = std::function<void(const std::vector<uint64_t> addresses, std::string error, const std::vector<object_references_t>& result)>;
 	using pause_app_callback = std::function<void(bool ok)>;
@@ -155,5 +161,7 @@ namespace owlcat
 		size_t get_types_count() const;
 		// Returns number of known callstacks
 		size_t get_callstacks_count() const;
+		// Queries the database for information about a particular allocation
+		bool get_allocation_type_and_stack(uint64_t address, uint64_t& type_id, uint64_t& stack_id) const;
 	};
 }
