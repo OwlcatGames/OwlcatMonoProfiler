@@ -19,9 +19,10 @@ run_dialog::run_dialog(QWidget* parent) :
         auto path = settings.value("path").toString();
         auto args = settings.value("arguments").toString();
         auto port = settings.value("port").toString();
+        auto mode = settings.value("mode").toString();
         auto lastTime = settings.value("lastTime").toLongLong();
 
-        m_prev_run_settings.push_back({path, args, port, lastTime});
+        m_prev_run_settings.push_back({path, args, port, mode, lastTime});
     }
     settings.endArray();
 
@@ -46,6 +47,11 @@ std::string run_dialog::arguments()
 int run_dialog::port()
 {
     return m_ui->port->text().toInt();
+}
+
+ProfileMode run_dialog::mode()
+{
+    return m_ui->modeMono->isChecked() ? PROFILE_MODE_MONO : PROFILE_MODE_IL2CPP;
 }
 
 void run_dialog::browseForApp()
@@ -99,14 +105,19 @@ void run_dialog::accept()
         return;
     }
 
+    QString mode = m_ui->modeMono->isChecked() ? "mono" : "il2cpp";
+
     auto iter = std::find_if(m_prev_run_settings.begin(), m_prev_run_settings.end(), [&](auto& s) {return s.path == path; });
     if (iter != m_prev_run_settings.end())
     {
         iter->time = time(0);
+        iter->args = args;
+        iter->port = port;
+        iter->mode = mode;
     }
     else
     {
-        m_prev_run_settings.push_back({ path, args, port, time(0) });
+        m_prev_run_settings.push_back({ path, args, port, mode, time(0)});
     }
 
     trim_prev_settings();
@@ -120,6 +131,7 @@ void run_dialog::accept()
         settings.setValue("path", s.path);
         settings.setValue("arguments", s.args);
         settings.setValue("port", s.port);
+        settings.setValue("mode", s.mode);
         settings.setValue("lastTime", s.time);
     }
     settings.endArray();
@@ -137,6 +149,8 @@ void run_dialog::onPathSelected(QString path)
     {
         m_ui->arguments->setText(iter->args);
         m_ui->port->setText(iter->port);
+        m_ui->modeMono->setChecked(iter->mode != "il2cpp");
+        m_ui->modeIl2cpp->setChecked(iter->mode == "il2cpp");
     }
 }
 

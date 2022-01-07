@@ -3,6 +3,13 @@
 #include "functor.h"
 #include "mono\metadata\profiler.h"
 
+#if OWLCAT_IL2CPP
+typedef struct Il2CppStackFrameInfo
+{
+	MonoMethod* method;
+} Il2CppStackFrameInfo;
+#endif
+
 namespace owlcat
 {
 	/*
@@ -11,7 +18,7 @@ namespace owlcat
 	namespace mono_functions
 	{
 		typedef MonoProfilerHandle(__stdcall* CreateProfilerType)(MonoProfiler* prof);
-		extern mono_func<CreateProfilerType> create_profiler_handle;		 
+		extern mono_func<CreateProfilerType> create_profiler_handle;	 
 
 		typedef void(__stdcall* WriteAllocationProc)(MonoProfiler* p, MonoObject* obj, MonoClass* klass);
 		typedef void(__stdcall* InstallAllocationsType)(WriteAllocationProc);
@@ -25,10 +32,17 @@ namespace owlcat
 		typedef void(__stdcall* SetEventsType)(int flags);
 		extern mono_func<SetEventsType> set_events_proc;
 
+#if OWLCAT_MONO
 		typedef void(__stdcall* GCRegisterRootProc)(MonoProfiler* prof, const mono_byte* start, size_t size, MonoGCRootSource source, const void* key, const char* name);
 		typedef void(__stdcall* GCUnRegisterRootProc)(MonoProfiler* prof, const mono_byte* start);
 		typedef void(__stdcall* SetGCRootRegisterProc)(_MonoProfilerDesc* handle, GCRegisterRootProc);
 		typedef void(__stdcall* SetGCRootUnRegisterProc)(_MonoProfilerDesc* handle, GCUnRegisterRootProc);
+#else
+		typedef void(__stdcall* GCRegisterRootProc)(MonoProfiler* prof, char* start, size_t size);
+		typedef void(__stdcall* GCUnRegisterRootProc)(MonoProfiler* prof, char* start);
+		typedef void(__stdcall* SetGCRootRegisterProc)(GCRegisterRootProc);
+		typedef void(__stdcall* SetGCRootUnRegisterProc)(GCUnRegisterRootProc);
+#endif
 		extern mono_func<SetGCRootRegisterProc> set_gc_register_root_proc;
 		extern mono_func<SetGCRootUnRegisterProc> set_gc_unregister_root_proc;
 
@@ -39,7 +53,12 @@ namespace owlcat
 		typedef const char* (__stdcall* GetNameType)(MonoClass*);
 		extern mono_func<GetNameType> get_class_namespace;
 		extern mono_func<GetNameType> get_class_name;
+#if OWLCAT_MONO
 		typedef void(__stdcall* StackWalkType)(MonoStackWalk func, void* user_data);
+#else
+		typedef void (*Il2CppFrameWalkFunc) (const Il2CppStackFrameInfo* info, void* user_data);
+		typedef void(__stdcall* StackWalkType)(Il2CppFrameWalkFunc func, void* user_data);
+#endif
 		extern mono_func<StackWalkType> stack_walk;
 		typedef const char* (__stdcall* GetMethodNameType)(MonoMethod*);
 		extern mono_func<GetMethodNameType> get_method_name;

@@ -6,6 +6,12 @@ namespace Ui {
     class RunDialog;
 }
 
+enum ProfileMode
+{
+    PROFILE_MODE_MONO,
+    PROFILE_MODE_IL2CPP
+};
+
 /*
     Dialog for running an app on the current computer and profiling it using Detouring
 */
@@ -16,6 +22,7 @@ class run_dialog : public QDialog
         QString path;
         QString args;
         QString port;
+        QString mode;
         time_t time;
     };
     std::vector<prev_run_settings> m_prev_run_settings;
@@ -33,6 +40,7 @@ public:
     std::string path();
     std::string arguments();
     int port();
+    ProfileMode mode();
 
 private:
     void trim_prev_settings();

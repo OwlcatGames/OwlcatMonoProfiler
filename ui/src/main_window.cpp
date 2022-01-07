@@ -402,6 +402,7 @@ void main_window::onRunUnityApp()
     auto path = dlg.path();
     auto args = dlg.arguments();
     int port = dlg.port();
+    auto mode = dlg.mode();
 
     m_data->clear();
     m_data->update_boundaries();
@@ -414,7 +415,12 @@ void main_window::onRunUnityApp()
     // Use "temporary" database, which stores part of content in memory for quicker writes
     m_db_file_name = "";// ":memory:"; std::tmpnam(0);
 
-    auto dllPath = QApplication::applicationDirPath() + "\\mono_profiler_mono.dll";
+    QString dllPath;
+    if (mode == PROFILE_MODE_MONO)
+        dllPath = QApplication::applicationDirPath() + "\\mono_profiler_mono.dll";
+    else
+        dllPath = QApplication::applicationDirPath() + "\\mono_profiler_il2cpp.dll";
+
     auto result = m_client.launch_executable(path, args, port, m_db_file_name.c_str(), dllPath.toStdString());
     if (result != owlcat::mono_profiler_client::OK)
     {

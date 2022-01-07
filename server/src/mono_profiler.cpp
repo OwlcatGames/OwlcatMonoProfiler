@@ -151,25 +151,25 @@ namespace owlcat
 			library* module_mono = m_module_mono.get();
 
 			return
-				install_allocations_proc.init(module_mono) &&
-				install_gc_proc.init(module_mono) &&
-				create_profiler_handle.init(module_mono) &&
-				//start_new_profiler.init(module) &&
-				//set_enable_allocations.init(module) &&
-				set_events_proc.init(module_mono) &&
-				set_gc_register_root_proc.init(module_mono) &&
-				set_gc_unregister_root_proc.init(module_mono) &&
-				profiler_install_proc.init(module_mono) &&
-				get_class_namespace.init(module_mono) &&
-				get_class_name.init(module_mono) &&
-				stack_walk.init(module_mono) &&
-				get_method_name.init(module_mono) &&
-				method_get_class.init(module_mono) &&
-				object_get_class.init(module_mono) &&
-				object_get_size.init(module_mono) &&
-				begin_liveness_calculation.init(module_mono) &&
-				end_liveness_calculation.init(module_mono) &&
-				calculate_liveness_from_statics.init(module_mono) &&
+				install_allocations_proc.init(module_mono, m_logger) &&
+				install_gc_proc.init(module_mono, m_logger) &&
+				set_events_proc.init(module_mono, m_logger) &&
+#ifdef OWLCAT_MONO
+				create_profiler_handle.init(module_mono, m_logger) &&
+#endif
+				set_gc_register_root_proc.init(module_mono, m_logger) &&
+				set_gc_unregister_root_proc.init(module_mono, m_logger) &&
+				profiler_install_proc.init(module_mono, m_logger) &&
+				get_class_namespace.init(module_mono, m_logger) &&
+				get_class_name.init(module_mono, m_logger) &&
+				stack_walk.init(module_mono, m_logger) &&
+				get_method_name.init(module_mono, m_logger) &&
+				method_get_class.init(module_mono, m_logger) &&
+				object_get_class.init(module_mono, m_logger) &&
+				object_get_size.init(module_mono, m_logger) &&
+				//begin_liveness_calculation.init(module_mono, m_logger) &&
+				//end_liveness_calculation.init(module_mono, m_logger) &&
+				//calculate_liveness_from_statics.init(module_mono, m_logger) &&
 				true;
 		}
 
@@ -214,6 +214,7 @@ namespace owlcat
 			set_events_proc(MONO_PROFILE_ALLOCATIONS | MONO_PROFILE_GC);
 
 			// 5. Create a handle for "new" profiler interface
+#if OWLCAT_MONO
 			m_logger.log_str("create_profiler_handle");
 			auto handle = create_profiler_handle((MonoProfiler*)this);
 
@@ -236,7 +237,20 @@ namespace owlcat
 				{
 					((details*)p)->on_root_unregister(start);
 				});
-
+#else
+			// 6. Install roots callback with the new handle
+			m_logger.log_str("set_gc_register_root_proc");
+			set_gc_register_root_proc(
+				[](MonoProfiler *p, char* start, size_t size)
+				{
+					((details*)p)->on_root_register((mono_byte*)start, MONO_ROOT_SOURCE_EXTERNAL, size, "", "");
+				});
+			set_gc_unregister_root_proc(
+				[](MonoProfiler* p, char* start)
+				{
+					((details*)p)->on_root_unregister((mono_byte*)start);
+				});
+#endif
 			// 7. Start worker thread that stores allocations in memory (it does a lot of heavy lifting with strings and containers, so we run it in another thread)
 			m_processing_thread = std::make_unique<worker_thread>(m_events_sink);
 			m_processing_thread->start();
@@ -257,10 +271,19 @@ namespace owlcat
 
 		m_details->m_logger.log_str("mono_profiler::start called");
 
+#if OWLCAT_MONO
 		m_details->m_logger.log_str("mono-2.0-bdwgc.dll");
+#else		
+		m_details->m_logger.log_str("GameAssembly.dll");
+#endif
+
 		// TODO: different name for *nix
 		// Get a handle to Mono library
+#if OWLCAT_MONO
 		m_details->m_module_mono = library::get_library("mono-2.0-bdwgc.dll");
+#else		
+		m_details->m_module_mono = library::get_library("GameAssembly.dll");
+#endif
 
 		if (m_details->m_module_mono == nullptr)
 		{

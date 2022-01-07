@@ -1,6 +1,7 @@
 #pragma once
 
 #include "load_library.h"
+#include "logger.h"
 
 namespace owlcat
 {
@@ -24,12 +25,20 @@ namespace owlcat
 		/*
 		    Performs a search for the function in the specified dynamic library module
 		*/
-		bool init(library* module)
+		bool init(library* module, logger& log)
 		{
 			if (m_addr == 0)
 				m_ptr = module->get_method_by_name<T>(m_name);
 			else if (m_name != nullptr)
 				m_ptr = module->get_method_by_addr<T>(m_addr);
+
+			if (m_ptr == nullptr)
+			{
+				char error[256];
+				sprintf(error, "Failed to find function with name %s or address %X", m_name, m_addr);
+				log.log_str(error);
+			}
+
 			return m_ptr != nullptr;
 		}
 

@@ -12,7 +12,7 @@ Owlcat Mono Profiler is a part of a planned family of Unity-related tools called
 
 ## Requirements
 
-Right now, Owlcat Mono Profiler is only compatible with desktop games made with a more-or-less recent version of Unity for Windows (the lowest tested version is 2018.4.10f, but earlier version might work, too). IL2CPP is not supported yet. The aim is to make it universal across the recent Unity versions, and cross-platform regarding both UI/client and target/server.
+Right now, Owlcat Mono Profiler is only compatible with desktop games made with a more-or-less recent version of Unity for Windows (the lowest tested version is 2018.4.10f, but earlier version might work, too). IL2CPP is now supported with some limitations. The aim is to make it universal across the recent Unity versions, and cross-platform regarding both UI/client and target/server.
 
 ## Features
 * Profile non-instrumented builds (without Script Debugging) on Windows (and on other desktop platforms in future)
@@ -31,7 +31,6 @@ Right now, Owlcat Mono Profiler is only compatible with desktop games made with 
 * Console version of profiler for distribution to players and automation
 * Custom events, displayed on graphs
 * Allocations grouped by callstack, with tree view
-* Support for IL2CPP
 * Support for non-Windows platforms
 
 ## Limitations
@@ -41,6 +40,8 @@ Right now, Owlcat Mono Profiler only profiles Mono heap usage. This means that y
 It often might be useful to search for particular types in Live Objects list, instead of only looking at top of the list, since a lot of objects take up very little Mono memory, but a lot of Unity memory (e.g. GameObjects, Textures, etc.).
 
 Profiling Unity heap in addition Mono heap might be a possibility in the future.
+
+Profiling a IL2CPP build requires modification to IL2CPP source (and a rebuild of your project). See [Profiling IL2CPP](doc/il2cpp.md).
 
 ## Building
 

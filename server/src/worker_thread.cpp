@@ -212,12 +212,19 @@ namespace owlcat
 
 		// This is a heavy call, but it can only be done here, for obvious reasons.
 		// We ease things up a bit by only collecting addresses here. do_work translates them into strings in another thread.
+#if OWLCAT_MONO
 		mono_functions::stack_walk(
 			[](MonoMethod* method, int32_t native_offset, int32_t il_offset, mono_bool managed, void* data) -> mono_bool
 			{
 				return ((stack_backtrace*)data)->add_trace(method, native_offset, il_offset, managed);
 			}, (void*)&item.backtrace);
-
+#else
+		mono_functions::stack_walk(
+			[](const Il2CppStackFrameInfo* frame_info, void* data)
+			{
+				((stack_backtrace*)data)->add_trace(frame_info->method, 0, 0, true);
+			}, (void*)&item.backtrace);
+#endif
 		m_work_items.enqueue(m_work_items_token, item);
 	}
 

@@ -73,12 +73,21 @@ if (WIN32)
             $<TARGET_FILE:mono_profiler_mono>
             $<TARGET_FILE_DIR:owlcat_mono_profiler_ui>
     )
+
+    # Detour need a server DLL to use, let's provide one in output folder
+    add_custom_command(
+        OUTPUT copy_server_dll_il2cpp
+        DEPENDS mono_profiler_il2cpp
+        COMMAND ${CMAKE_COMMAND} -E copy
+            $<TARGET_FILE:mono_profiler_il2cpp>
+            $<TARGET_FILE_DIR:owlcat_mono_profiler_ui>
+    )
 endif()
 
 # ---------------- Targets ----------------
 
 if (WIN32)
-	add_executable( owlcat_mono_profiler_ui WIN32 ${ALL_SOURCES} copy_qwt_dll copy_qwt_pdb copy_server_dll )
+	add_executable( owlcat_mono_profiler_ui WIN32 ${ALL_SOURCES} copy_qwt_dll copy_qwt_pdb copy_server_dll copy_server_dll_il2cpp )
 else()
     add_executable( owlcat_mono_profiler_ui ${ALL_SOURCES} )
 endif()
