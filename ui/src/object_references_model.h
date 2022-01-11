@@ -1,5 +1,6 @@
 #pragma once
 #include <qabstractitemmodel.h>
+#include <memory>
 
 #include "mono_profiler_client.h"
 

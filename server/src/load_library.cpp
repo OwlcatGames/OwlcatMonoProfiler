@@ -1,5 +1,9 @@
 #include "load_library.h"
 
+#ifndef WIN32
+    #include <dlfcn.h>
+#endif
+
 namespace owlcat
 {
 	void* library::get_method_by_name_internal(const char* name)
@@ -7,7 +11,7 @@ namespace owlcat
 #ifdef OS_WINDOWS
 		return GetProcAddress(m_module, name);
 #else
-		// TODO: dlopen
+		return dlsym(m_module, name);
 #endif
 	}
 
@@ -16,7 +20,7 @@ namespace owlcat
 #ifdef OS_WINDOWS
 		return (void*)((char*)m_module + addr);
 #else
-		// TODO: dlopen
+		return (void*)((char*)m_module + addr);
 #endif
 	}
 
@@ -28,7 +32,10 @@ namespace owlcat
 			return nullptr;
 		return std::unique_ptr<library>(new library(module));
 #else
-		// TODO: dlopen
+		auto module = dlopen(path, RTLD_LAZY);
+		if (module == nullptr)
+			return nullptr;
+		return std::unique_ptr<library>(new library(module));
 #endif
 	}
 
@@ -40,7 +47,10 @@ namespace owlcat
 			return nullptr;
 		return std::unique_ptr<library>(new library(module));
 #else
-		// TODO: dlopen
+		auto module = dlopen(name, RTLD_LAZY | RTLD_NOLOAD);
+		if (module == nullptr)
+			return nullptr;
+		return std::unique_ptr<library>(new library(module));
 #endif
 	}
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <stdio.h>
 
 /*
 	A very basic logger.

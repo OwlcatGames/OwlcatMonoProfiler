@@ -1,5 +1,3 @@
-#pragma once
-
 #include "mono_functions.h"
 
 namespace owlcat

@@ -30,3 +30,5 @@ set_property( TARGET persistent_storage PROPERTY CXX_STANDARD 17 )
 
 target_include_directories( persistent_storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/ )
 target_include_directories( persistent_storage PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/ )
+
+target_link_libraries( persistent_storage PUBLIC -ldl )

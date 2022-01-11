@@ -7,6 +7,8 @@
 	#include "Windows.h"
 	using module_t = HMODULE;
 	#define OS_WINDOWS
+#else
+    using module_t = void*;
 #endif
 
 namespace owlcat

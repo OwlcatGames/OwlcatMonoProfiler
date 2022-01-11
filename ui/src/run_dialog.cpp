@@ -132,7 +132,7 @@ void run_dialog::accept()
         settings.setValue("arguments", s.args);
         settings.setValue("port", s.port);
         settings.setValue("mode", s.mode);
-        settings.setValue("lastTime", s.time);
+        settings.setValue("lastTime", (qulonglong)s.time);
     }
     settings.endArray();
 

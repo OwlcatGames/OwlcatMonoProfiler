@@ -10,8 +10,6 @@ set( SOURCES_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/src )
 set( INCLUDES_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/include )
 
 set( ALL_SOURCES         
-    ${INCLUDES_ROOT}/dll_exports.h
-    ${SOURCES_ROOT}/dll_main.cpp
     ${SOURCES_ROOT}/mono_functions.h    
     ${SOURCES_ROOT}/mono_profiler.h
     ${SOURCES_ROOT}/mono_profiler.cpp
@@ -23,6 +21,10 @@ set( ALL_SOURCES
     ${SOURCES_ROOT}/worker_thread.h
     ${SOURCES_ROOT}/worker_thread.cpp
 )
+
+if (WIN32)
+    list( APPEND ALL_SOURCES ${INCLUDES_ROOT}/dll_exports.h ${SOURCES_ROOT}/dll_main.cpp )
+endif()
 
 set( ALL_SOURCES_MONO ${ALL_SOURCES} )
 list( APPEND ALL_SOURCES_MONO ${SOURCES_ROOT}/mono_functions_mono.cpp )
@@ -46,6 +48,8 @@ if(WIN32)
     target_include_directories( mono_profiler_mono PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../external/detours/include )
     target_link_libraries( mono_profiler_mono PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../external/detours/lib.X64/detours.lib )
     target_compile_definitions( mono_profiler_mono PRIVATE -D _AMD64_ )
+else()
+    target_link_libraries( mono_profiler_mono PRIVATE dl )
 endif()
 
 
@@ -65,4 +69,6 @@ if(WIN32)
     target_include_directories( mono_profiler_il2cpp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../external/detours/include )
     target_link_libraries( mono_profiler_il2cpp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../external/detours/lib.X64/detours.lib )
     target_compile_definitions( mono_profiler_il2cpp PRIVATE -D _AMD64_ )
+else()
+    target_link_libraries( mono_profiler_il2cpp PRIVATE dl )
 endif()

@@ -53,7 +53,7 @@ namespace owlcat
 		mono_profiler_client();
 		~mono_profiler_client();
 
-#if defined(WIN32)
+//#if defined(WIN32)
 		enum LaunchResult
 		{
 			OK,
@@ -70,7 +70,7 @@ namespace owlcat
 
 		// Launches target executable, detouring it using profiler's DLL. Allows profiling non-instrumented apps.
 		LaunchResult launch_executable(const std::string& executable, const std::string& args, int port, const std::string& db_file_name, const std::string& dll_location);
-#endif
+//#endif
 		// Attempts to connect to a running profiler server
 		bool start(const std::string& addr, int server_port, const std::string& db_file_name);
 		// Stops communications with profiler server. Leaves current profiling data accessible.

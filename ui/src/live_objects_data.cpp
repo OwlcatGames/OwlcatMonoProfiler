@@ -45,14 +45,14 @@ QVariant live_objects_by_type_model::data(const QModelIndex& index, int role) co
     if (col < 0 || col >= 3) return QVariant();
 
     if (role == role::Type)
-        return m_rows[row].type;
+        return (qulonglong)m_rows[row].type;
     if (role == role::Size)
-        return m_rows[row].size;
+        return (qulonglong)m_rows[row].size;
 
     if (col == 0)
         return m_data->get_type_name(m_rows[row].type);
     else if (col == 1)
-        return m_rows[row].count;
+        return (qulonglong)m_rows[row].count;
     else
         return size_to_string(m_rows[row].size);
 }
@@ -184,12 +184,12 @@ QVariant live_callstacks_by_type_model::data(const QModelIndex& index, int role)
     if (col < 0 || col >= 3) return QVariant();
 
     if (role == role::Callstack)
-        return m_rows[row].callstack;
+        return (qulonglong)m_rows[row].callstack;
 
     if (col == 0)
         return m_data->get_callstack(m_rows[row].callstack);
     else if (col == 1)
-        return m_rows[row].count;
+        return (qulonglong)m_rows[row].count;
     else
         return size_to_string(m_rows[row].size);
 }

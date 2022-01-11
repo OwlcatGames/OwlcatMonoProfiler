@@ -194,8 +194,10 @@ namespace owlcat
 			// There should be no events before we receice the first frame
 			if (m_prev_frame == 0xFFFFFFFFFFFFFFFF)
 			{
+#ifdef WIN32
 				if (!m_frame_events.empty())
 					__debugbreak();
+#endif
 				return;
 			}
 
@@ -308,9 +310,11 @@ namespace owlcat
 						reader.read_string(name) &&
 						reader.read_string(callstack);
 
+#ifdef WIN32
 					// Frames should always be sequential
 					if (frame < m_prev_frame && m_prev_frame != 0xFFFFFFFFFFFFFFFF)
 						__debugbreak();
+#endif
 
 					if (all_ok)
 					{
@@ -437,7 +441,9 @@ namespace owlcat
 				else
 				{
 					printf("Received bad message\n");
+#ifdef WIN32
 					__debugbreak();
+#endif
 				}
 
 				// Avoid storing too many events in queue
@@ -525,6 +531,14 @@ namespace owlcat
 
 			// We only support launching applications on the same computer, so use loopback IP
 			return start("127.0.0.1", port, db_file_name.c_str()) ? mono_profiler_client::OK : mono_profiler_client::CONNECT_FAILED;
+		}
+#else
+		mono_profiler_client::LaunchResult launch_executable(const std::string& executable, const std::string& commandline, int port, const std::string& db_file_name, const std::string& dll_location)
+		{
+			std::filesystem::path exec_path(executable);
+			std::string cwd = exec_path.parent_path().string();
+
+			return mono_profiler_client::CONNECT_FAILED;
 		}
 #endif
 
@@ -850,12 +864,10 @@ public:
 		delete m_details;
 	}
 
-#if defined(WIN32)
 	mono_profiler_client::LaunchResult mono_profiler_client::launch_executable(const std::string& executable, const std::string& args, int port, const std::string& db_file_name, const std::string& dll_location)
 	{
 		return m_details->launch_executable(executable, args, port, db_file_name, dll_location);
 	}
-#endif
 
 	bool mono_profiler_client::start(const std::string& addr, int server_port, const std::string& db_file_name)
 	{

@@ -2,11 +2,16 @@
 
 namespace owlcat
 {
+#ifdef WIN32
+    #define DLL_EXPORT __declspec(dllexport)
+#else
+    #define DLL_EXPORT __attribute__ ((dllexport))
+#endif
 	/*
 		Class that starts and stops the profiler,
 		and also handles network connections.
 	*/
-	class __declspec(dllexport) mono_profiler_server
+	class DLL_EXPORT mono_profiler_server
 	{
 		class details;
 

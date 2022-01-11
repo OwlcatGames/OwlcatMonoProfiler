@@ -27,7 +27,7 @@ QVariant search_results_types_model::data(const QModelIndex& index, int role) co
     if (col < 0 || col >= 3) return QVariant();
 
     if (role == role::Type)
-        return m_rows[row].type;
+        return (qulonglong)m_rows[row].type;
 
     if (col == 0)
         return m_data->get_type_name(m_rows[row].type);
@@ -124,7 +124,7 @@ QVariant search_results_callstacks_model::data(const QModelIndex& index, int rol
     if (col < 0 || col >= 3) return QVariant();
 
     if (role == role::Callstack)
-        return m_rows[row].callstack;
+        return (qulonglong)m_rows[row].callstack;
 
     if (col == 0)
         return m_data->get_callstack(m_rows[row].callstack);

@@ -5,6 +5,7 @@
 #include <string.h>
 #include <iostream>
 #include <filesystem>
+#include <algorithm>
 
 namespace persistent_storage{
 

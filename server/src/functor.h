@@ -46,11 +46,11 @@ namespace owlcat
 		    Performs a search for the function in the specified dynamic library module using mangled name
 			(can be used with exported C++ function and methods with some reservations)
 		*/
-		bool init_mangled(library* module)
-		{
-			m_ptr = module->get_method_by_name_mangled<T>(m_name);
-			return m_ptr != nullptr;
-		}
+		//bool init_mangled(library* module)
+		//{
+		//	m_ptr = module->get_method_by_name_mangled<T>(m_name);
+		//	return m_ptr != nullptr;
+		//}
 
 		/*
 		    The next set of operators invoke the function with a varying number of parameters.

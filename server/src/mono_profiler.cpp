@@ -8,7 +8,7 @@
 #include <functional>
 #include <unordered_map>
 
-#include "mono\metadata\profiler.h"
+#include "mono/metadata/profiler.h"
 
 #include "logger.h"
 

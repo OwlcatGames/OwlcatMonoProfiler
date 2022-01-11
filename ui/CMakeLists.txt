@@ -94,13 +94,20 @@ endif()
 
 set_property( TARGET owlcat_mono_profiler_ui PROPERTY CXX_STANDARD 17 )
 
-target_link_libraries( owlcat_mono_profiler_ui PRIVATE owlcat_mono_profiler_client Qt5::Widgets debug Qwt::Qwtd optimized Qwt::Qwt)
+if (WIN32)
+    target_link_libraries( owlcat_mono_profiler_ui PRIVATE owlcat_mono_profiler_client Qt5::Widgets debug Qwt::Qwtd optimized Qwt::Qwt)
+else()
+    # Linux don't have debug versions of libraries installed usually
+    target_link_libraries( owlcat_mono_profiler_ui PRIVATE -ldl owlcat_mono_profiler_client Qt5::Widgets Qwt::Qwt)
+endif()
+
+
 
 # Copy Qt DLLs to ouput folder
-#if (WIN32 AND NOT BUILD_FOR_PACKAGING)
+if (WIN32)
     add_custom_command(
         TARGET owlcat_mono_profiler_ui
         POST_BUILD
         COMMAND ${Qt5_DIR}/../../../bin/windeployqt.exe $<TARGET_FILE_DIR:owlcat_mono_profiler_ui>/$<TARGET_FILE_NAME:owlcat_mono_profiler_ui> -opengl -angle --no-opengl-sw
     )
-#endif()
+endif()

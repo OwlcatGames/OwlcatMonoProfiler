@@ -90,7 +90,7 @@ void connect_dialog::accept()
         settings.setArrayIndex(index++);
         settings.setValue("ip", s.ip);
         settings.setValue("port", s.port);
-        settings.setValue("lastTime", s.time);
+        settings.setValue("lastTime", (qulonglong)s.time);
     }
     settings.endArray();
 

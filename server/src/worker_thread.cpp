@@ -7,6 +7,7 @@
 #include <string>
 #include <execution>
 #include <cassert>
+#include <cstring>
 #include <mono/metadata/object.h>
 
 using namespace owlcat::mono_functions;
@@ -56,14 +57,18 @@ namespace owlcat
 	// This is called by find_references. The object in question may no longer be allocated in reality, so guard with SEH
 	void get_full_class_name(char* buffer, size_t buffer_size, uint64_t address)
 	{
+#ifdef WIN32
 		__try
+#endif
 		{
 			auto klass = object_get_class((MonoObject*)address);
 			get_full_class_name(buffer, buffer_size, klass);
 		}
+#ifdef WIN32
 		__except (EXCEPTION_EXECUTE_HANDLER)
 		{
 		}
+#endif
 	}
 
 	/*
@@ -165,7 +170,8 @@ namespace owlcat
 		}
 
 		// Clear queue when thread stops
-		m_work_items.swap(moodycamel::ConcurrentQueue<work_item>());
+		auto empty_queue = moodycamel::ConcurrentQueue<work_item>();
+		m_work_items.swap(empty_queue);
 		m_allocations.clear();
 	}
 
@@ -234,9 +240,12 @@ namespace owlcat
 	// This approach, however, can hide some errors
 	intptr_t get_ptr_safe(const uint8_t* p)
 	{
+#ifdef WIN32
 		__try
 		{
+#endif
 			return *((intptr_t*)p);
+#ifdef WIN32
 		}
 		__except (EXCEPTION_EXECUTE_HANDLER)
 		{
@@ -244,6 +253,7 @@ namespace owlcat
 		}
 
 		return 0;
+#endif
 	}
 
 	int worker_thread::do_gc_internal(uint64_t frame, bool only_update_parents)

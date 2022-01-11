@@ -2,6 +2,7 @@
 
 #include <string>
 #include <iterator>
+#include <cstring>
 
 /**
     \brief A helper class for safely reading data from a std::vector of bytes

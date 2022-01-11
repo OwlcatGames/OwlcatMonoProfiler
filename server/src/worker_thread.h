@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mono\metadata\profiler.h"
+#include "mono/metadata/profiler.h"
 #include <vector>
 #include <thread>
 #include <mutex>

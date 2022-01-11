@@ -29,6 +29,10 @@ set( ALL_SOURCES
 
 # ---------------- Targets ----------------
 
+if(WIN32)
+    add_definitions( -D _CRT_SECURE_NO_WARNINGS -D NOMINMAX -D WIN32_LEAN_AND_MEAN )
+endif()
+
 add_library( owlcat_mono_profiler_network STATIC ${ALL_SOURCES} )
 set_property( TARGET owlcat_mono_profiler_network PROPERTY CXX_STANDARD 17 )
 

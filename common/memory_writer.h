@@ -1,6 +1,7 @@
 #pragma once
 
 #include <iterator>
+#include <string.h>
 
 class memory_writer
 {

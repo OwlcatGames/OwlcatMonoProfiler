@@ -7,6 +7,8 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 if(WIN32)
     add_definitions( -D _CRT_SECURE_NO_WARNINGS -D NOMINMAX -D WIN32_LEAN_AND_MEAN )
+else()
+    set( CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
 # ---------------- Variables ----------------
