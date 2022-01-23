@@ -98,7 +98,7 @@ if (WIN32)
     target_link_libraries( owlcat_mono_profiler_ui PRIVATE owlcat_mono_profiler_client Qt5::Widgets debug Qwt::Qwtd optimized Qwt::Qwt)
 else()
     # Linux don't have debug versions of libraries installed usually
-    target_link_libraries( owlcat_mono_profiler_ui PRIVATE -ldl owlcat_mono_profiler_client Qt5::Widgets Qwt::Qwt)
+    target_link_libraries( owlcat_mono_profiler_ui PRIVATE -ldl owlcat_mono_profiler_client Qt5::Widgets Qwt::Qwt libstdc++fs.a)
 endif()
 
 

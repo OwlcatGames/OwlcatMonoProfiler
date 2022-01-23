@@ -5,7 +5,6 @@
 
 #include <thread>
 #include <string>
-#include <execution>
 #include <cassert>
 #include <cstring>
 #include <mono/metadata/object.h>

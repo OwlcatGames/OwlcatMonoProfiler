@@ -42,7 +42,9 @@ add_subdirectory( persistent_storage )
 add_subdirectory( server )
 add_subdirectory( client )
 add_subdirectory( ui )
-add_subdirectory( test )
+if (WIN32)
+    add_subdirectory( test )
+endif()
 
 # ---------------- Packaging ----------------
 

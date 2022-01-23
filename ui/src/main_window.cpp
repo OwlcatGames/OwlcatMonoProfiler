@@ -5,7 +5,6 @@
 #include "qwt_point_data.h"
 #include "qwt_picker_machine.h"
 #include "qwt_scale_widget.h"
-#include <execution>
 #include <algorithm>
 #include <future>
 #include <chrono>
@@ -153,10 +152,10 @@ main_window::main_window(QWidget* parent) :
     m_live_objects_callstacks_progress_layout->addSpacing(100);
     m_live_objects_callstacks_progress->setVisible(false);
 
-    connect(this, SIGNAL(onLiveObjectTypesProgressChanged(int)), m_live_objects_types_progress.get(), SLOT(setValue(int)), Qt::ConnectionType::QueuedConnection);
-    connect(this, SIGNAL(onLiveObjectTypesProgressInitiated(int, int)), m_live_objects_types_progress.get(), SLOT(setRange(int, int)), Qt::ConnectionType::QueuedConnection);
-    connect(this, SIGNAL(onLiveObjectCallstacksProgressChanged(int)), m_live_objects_callstacks_progress.get(), SLOT(setValue(int)), Qt::ConnectionType::QueuedConnection);
-    connect(this, SIGNAL(onLiveObjectCallstacksProgressInitiated(int, int)), m_live_objects_callstacks_progress.get(), SLOT(setRange(int, int)), Qt::ConnectionType::QueuedConnection);
+    connect(this, SIGNAL(onLiveObjectTypesProgressChanged(int)), m_live_objects_types_progress.data(), SLOT(setValue(int)), Qt::ConnectionType::QueuedConnection);
+    connect(this, SIGNAL(onLiveObjectTypesProgressInitiated(int, int)), m_live_objects_types_progress.data(), SLOT(setRange(int, int)), Qt::ConnectionType::QueuedConnection);
+    connect(this, SIGNAL(onLiveObjectCallstacksProgressChanged(int)), m_live_objects_callstacks_progress.data(), SLOT(setValue(int)), Qt::ConnectionType::QueuedConnection);
+    connect(this, SIGNAL(onLiveObjectCallstacksProgressInitiated(int, int)), m_live_objects_callstacks_progress.data(), SLOT(setRange(int, int)), Qt::ConnectionType::QueuedConnection);
 
     // --------- Pickers ---------
 
