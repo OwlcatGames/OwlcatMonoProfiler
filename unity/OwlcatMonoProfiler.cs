@@ -8,10 +8,10 @@ namespace Owlcat
     {
 #if PROFILE_MONO
         [DllImport("mono_profiler_mono")]
-        private static extern void StartProfiling();
+        public static extern void StartProfiling();
 
         [DllImport("mono_profiler_mono")]
-        private static extern void EndProfilingFrame();
+        public static extern void EndProfilingFrame();
 #endif
 
         IEnumerator Start()

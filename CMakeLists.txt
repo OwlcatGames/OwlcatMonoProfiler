@@ -30,6 +30,7 @@ if (WIN32)
     include_external_msproject( detours ${CMAKE_SOURCE_DIR}/external/detours/vc/Detours.vcxproj )
     set_target_properties(detours PROPERTIES
          MAP_IMPORTED_CONFIG_DEBUG DebugMDd
+         MAP_IMPORTED_CONFIG_RELEASE ReleaseMD
          MAP_IMPORTED_CONFIG_MINSIZEREL ReleaseMD
          MAP_IMPORTED_CONFIG_RELWITHDEBINFO ReleaseMD
     )

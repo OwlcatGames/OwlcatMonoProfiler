@@ -1,12 +1,7 @@
 #include <iostream>
-#include <sstream>
-#include <algorithm>
-#include <string>
 #include <queue>
 #include <mutex>
-#include <thread>
-#include <functional>
-#include <unordered_map>
+#include <chrono>
 
 #include "mono/metadata/profiler.h"
 

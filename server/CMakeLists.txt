@@ -52,6 +52,13 @@ else()
     target_link_libraries( mono_profiler_mono PRIVATE dl )
 endif()
 
+if(MSVC)
+    # test/CMakeLists.txt copies this target's PDB next to the test exe; MSVC does not
+    # emit one for Release/MinSizeRel by default, so force it on for those configs.
+    target_compile_options( mono_profiler_mono PRIVATE $<$<CONFIG:Release,MinSizeRel>:/Zi> )
+    target_link_options( mono_profiler_mono PRIVATE $<$<CONFIG:Release,MinSizeRel>:/DEBUG> )
+endif()
+
 
 
 add_library( mono_profiler_il2cpp SHARED ${ALL_SOURCES_IL2CPP} )
