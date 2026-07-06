@@ -2,6 +2,7 @@
 
 #include "mono/metadata/profiler.h"
 #include <vector>
+#include <string>
 #include <thread>
 #include <mutex>
 #include <shared_mutex>
@@ -252,9 +253,61 @@ namespace owlcat
 		// A list of GC roots
 		std::vector<root_info> m_roots;
 
+		/*
+			Symbol resolution caches and id interning (see do_work).
+			Mono/IL2CPP never unload classes or methods in Unity, so caching resolved
+			names by pointer is safe for the lifetime of the process.
+			Everything below is only touched from the worker thread.
+		*/
+
+		// A resolved method name, as it appears as one line of callstack text
+		struct method_entry
+		{
+			// "Class.Method\n"
+			std::string text;
+			// True if the name contains one of m_stopwords
+			bool stopword;
+		};
+		std::unordered_map<MonoMethod*, method_entry> m_method_cache;
+
+		// Types already reported to client, and the ids they were reported with
+		std::unordered_map<MonoClass*, uint32_t> m_type_ids;
+		uint32_t m_next_type_id = 0;
+
+		struct methods_hash
+		{
+			size_t operator()(const std::vector<MonoMethod*>& methods) const
+			{
+				// FNV-1a over the raw pointer values
+				size_t hash = 14695981039346656037ULL;
+				for (auto method : methods)
+				{
+					hash ^= (size_t)method;
+					hash *= 1099511628211ULL;
+				}
+				return hash;
+			}
+		};
+		struct callstack_entry
+		{
+			uint32_t id;
+			// Callstacks that contain a stopword are never reported, and neither are allocations made with them
+			bool stopword;
+		};
+		// Callstacks already reported to client, keyed by the raw sequence of methods
+		std::unordered_map<std::vector<MonoMethod*>, callstack_entry, methods_hash> m_callstack_ids;
+		uint32_t m_next_callstack_id = 0;
+
 	private:
 		// Main processing function
 		void do_work();
+
+		// Resolves a method name via Mono functions, caching the result by method pointer
+		const method_entry& resolve_method(MonoMethod* method);
+		// Returns an id for the type, reporting a definition to the client on first sight
+		uint32_t intern_type(MonoClass* klass);
+		// Returns interned info for a callstack, reporting a definition to the client on first sight
+		const callstack_entry& intern_callstack(const std::vector<MonoMethod*>& methods);
 
 		/*
 			This function performs pseoud-GC on our list of allocations to mark all live objects

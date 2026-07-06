@@ -30,8 +30,12 @@ namespace owlcat
 	class events_sink
 	{
 	public:
-		virtual void report_alloc(uint64_t frame, uint64_t addr, uint32_t size, const char* full_name, const char* callstack) = 0;
+		virtual void report_alloc(uint64_t frame, uint64_t addr, uint32_t size, uint32_t type_id, uint32_t callstack_id) = 0;
 		virtual void report_free(uint64_t frame, uint64_t addr, uint32_t size) = 0;
+		// Type and callstack definitions. The profiler assigns the ids, and reports each definition
+		// once, before the first allocation that references it
+		virtual void report_type(uint32_t type_id, const char* name) = 0;
+		virtual void report_callstack(uint32_t callstack_id, const char* text) = 0;
 		virtual void report_references(uint64_t request_id, const std::vector<object_references_t>& references) = 0;
 		virtual void report_paused(uint64_t request_id, bool ok) = 0;
 		virtual void report_resumed(uint64_t request_id, bool ok) = 0;

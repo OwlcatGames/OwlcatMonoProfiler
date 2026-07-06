@@ -35,8 +35,9 @@ namespace owlcat
 		uint64_t frame;
 		uint64_t addr;
 		uint32_t size;
-		std::string obj_type;
-		std::string callstack;
+		// Database ids (already translated from server-side ids when the message was read)
+		uint64_t type_id;
+		uint64_t callstack_id;
 	};
 
 	struct base_command
@@ -154,6 +155,14 @@ namespace owlcat
 		uint64_t m_next_type_id = 0;
 		uint64_t m_next_callstack_id = 0;
 
+		// Maps from server-side ids (as sent over the wire) to database ids.
+		// The server interns by class/method pointers and can report different ids
+		// for the same name (e.g. different instantiations of a generic type), and its
+		// id space restarts when the profiler in the game restarts. Database ids are
+		// canonicalized by name, so we translate every server id on arrival.
+		std::unordered_map<uint64_t, uint64_t> m_server_type_map;
+		std::unordered_map<uint64_t, uint64_t> m_server_callstack_map;
+
 		std::string m_db_file_name;
 
 		// Inserts a new type ID into database, or returns one already present from memory cache
@@ -188,6 +197,34 @@ namespace owlcat
 			return callstack_id;
 		}
 
+		// Translates a server-side type id into a database id
+		uint64_t translate_server_type_id(uint64_t server_id)
+		{
+			auto iter = m_server_type_map.find(server_id);
+			if (iter != m_server_type_map.end())
+				return iter->second;
+
+			// Should never happen: definitions always precede allocations that reference them
+			printf("Allocation references unknown type id %llu\n", (unsigned long long)server_id);
+			uint64_t type_id = get_or_create_type_id("<unknown type>");
+			m_server_type_map.emplace(server_id, type_id);
+			return type_id;
+		}
+
+		// Translates a server-side callstack id into a database id
+		uint64_t translate_server_callstack_id(uint64_t server_id)
+		{
+			auto iter = m_server_callstack_map.find(server_id);
+			if (iter != m_server_callstack_map.end())
+				return iter->second;
+
+			// Should never happen: definitions always precede allocations that reference them
+			printf("Allocation references unknown callstack id %llu\n", (unsigned long long)server_id);
+			uint64_t callstack_id = get_or_create_callstack_id("<unknown callstack>");
+			m_server_callstack_map.emplace(server_id, callstack_id);
+			return callstack_id;
+		}
+
 		// Saves events from the current frame into database using a transaction for maximum performance
 		void save_frame_events()
 		{
@@ -205,11 +242,7 @@ namespace owlcat
 			for (auto& e : m_frame_events)
 			{
 				if (e.type == profiler_event::alloc)
-				{
-					uint64_t type_id = get_or_create_type_id(e.obj_type);
-					uint64_t callstack_id = get_or_create_callstack_id(e.callstack);
-					queries::insert_alloc_event(m_db, e.frame, e.addr, e.size, type_id, callstack_id);
-				}
+					queries::insert_alloc_event(m_db, e.frame, e.addr, e.size, e.type_id, e.callstack_id);
 				else
 					queries::insert_free_event(m_db, e.frame, e.addr, e.size);
 			}
@@ -301,14 +334,14 @@ namespace owlcat
 					uint64_t frame;
 					uint64_t addr;
 					uint32_t size;
-					std::string name;
-					std::string callstack;
+					uint64_t server_type_id;
+					uint64_t server_callstack_id;
 					bool all_ok =
 						reader.read_uint64(frame) &&
 						reader.read_uint64(addr) &&
 						reader.read_uint32(size) &&
-						reader.read_string(name) &&
-						reader.read_string(callstack);
+						reader.read_varint(server_type_id) &&
+						reader.read_varint(server_callstack_id);
 
 #ifdef WIN32
 					// Frames should always be sequential
@@ -319,7 +352,7 @@ namespace owlcat
 					if (all_ok)
 					{
 						try_save_events(frame);
-						m_frame_events.push_back({profiler_event::alloc, frame, addr, size, name, callstack});
+						m_frame_events.push_back({profiler_event::alloc, frame, addr, size, translate_server_type_id(server_type_id), translate_server_callstack_id(server_callstack_id)});
 						++m_frame_allocs;
 						m_size_running_total += size;
 					}
@@ -332,14 +365,14 @@ namespace owlcat
 					uint64_t addr;
 					uint32_t size;
 					bool all_ok =
-						reader.read_uint64(frame);
-						reader.read_uint64(addr);
+						reader.read_uint64(frame) &&
+						reader.read_uint64(addr) &&
 						reader.read_uint32(size);
 
 					if (all_ok)
 					{
 						try_save_events(frame);
-						m_frame_events.push_back({ profiler_event::free, frame, addr, size, "", "" });		
+						m_frame_events.push_back({ profiler_event::free, frame, addr, size, 0, 0 });		
 						++m_frame_frees;
 						m_size_running_total -= size;
 					}
@@ -437,6 +470,32 @@ namespace owlcat
 					}
 
 					cmd->callback(error == 0);
+				}
+				else if (msg.header.type == protocol::message::SRV_TYPE)
+				{
+					uint64_t server_id;
+					std::string name;
+					bool all_ok =
+						reader.read_varint(server_id) &&
+						reader.read_string(name);
+
+					if (all_ok)
+						m_server_type_map[server_id] = get_or_create_type_id(name);
+					else
+						printf("Received type definition, but msg is broken\n");
+				}
+				else if (msg.header.type == protocol::message::SRV_CALLSTACK)
+				{
+					uint64_t server_id;
+					std::string callstack;
+					bool all_ok =
+						reader.read_varint(server_id) &&
+						reader.read_string(callstack);
+
+					if (all_ok)
+						m_server_callstack_map[server_id] = get_or_create_callstack_id(callstack);
+					else
+						printf("Received callstack definition, but msg is broken\n");
 				}
 				else
 				{
@@ -552,6 +611,27 @@ namespace owlcat
 
 			m_db.close();
 
+			// This is a new session with a new database: reset id maps and frame-tracking
+			// state possibly left over from a previous session or a previously opened database
+			m_type_to_id_map.clear();
+			m_id_to_type_map.clear();
+			m_callstacks_to_id_map.clear();
+			m_id_to_callstacks_map.clear();
+			m_server_type_map.clear();
+			m_server_callstack_map.clear();
+			m_next_type_id = 0;
+			m_next_callstack_id = 0;
+
+			m_frame_events.clear();
+			m_prev_frame = 0xFFFFFFFFFFFFFFFF;
+			m_frame_allocs = 0;
+			m_frame_frees = 0;
+			m_size_running_total = 0;
+			m_has_min_frame = false;
+			m_min_frame = 0;
+			m_max_frame = 0;
+			m_stop = false;
+
 			m_db_file_name = db_file_name;
 
 			// Remove existing database (if we use a non-temporary one)
@@ -617,6 +697,12 @@ namespace owlcat
 
 			if (m_db.is_open())
 				m_db.close();
+
+			// Don't mix ids from a previously opened database or session
+			m_type_to_id_map.clear();
+			m_id_to_type_map.clear();
+			m_callstacks_to_id_map.clear();
+			m_id_to_callstacks_map.clear();
 
 			return m_db.open(file, false) && upgrade_database(m_db) && queries::register_queries(m_db) && load_types_and_callstacks();
 		}

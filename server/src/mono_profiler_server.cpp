@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <thread>
+#include <unordered_map>
 
 #include <memory_writer.h>
 #include <memory_reader.h>
@@ -25,23 +26,77 @@ namespace owlcat
 		{
 			network& m_network;
 
+			/*
+				All type and callstack definitions reported so far. The profiler reports each
+				definition only once, but a client that (re)connects mid-session has never seen
+				the definitions sent earlier, so we keep them all and re-send them when a new
+				connection is detected.
+				Only accessed from the worker thread (which is the only caller of
+				report_alloc/report_free/report_type/report_callstack), so no locking is needed.
+			*/
+			std::unordered_map<uint32_t, std::string> m_type_defs;
+			std::unordered_map<uint32_t, std::string> m_callstack_defs;
+			// Value of m_network.connection_generation() the definitions were last sent for
+			uint64_t m_defs_generation = 0;
+
+			void send_type(uint32_t type_id, const char* name)
+			{
+				static std::vector<uint8_t> data;
+				data.reserve(1024);
+				data.clear();
+				memory_writer writer(data);
+				writer.write_varint(type_id);
+				writer.write_string(name);
+
+				m_network.write_message(protocol::message::SRV_TYPE, (uint32_t)data.size(), (uint8_t*)&data[0]);
+			}
+
+			void send_callstack(uint32_t callstack_id, const char* text)
+			{
+				static std::vector<uint8_t> data;
+				data.reserve(5 * 1024);
+				data.clear();
+				memory_writer writer(data);
+				writer.write_varint(callstack_id);
+				writer.write_string(text);
+
+				m_network.write_message(protocol::message::SRV_CALLSTACK, (uint32_t)data.size(), (uint8_t*)&data[0]);
+			}
+
+			// If a new connection was established since the last event, (re-)send all definitions:
+			// the client on the other side has never seen them
+			void update_definitions()
+			{
+				uint64_t generation = m_network.connection_generation();
+				if (generation == m_defs_generation)
+					return;
+				m_defs_generation = generation;
+
+				for (auto& def : m_type_defs)
+					send_type(def.first, def.second.c_str());
+				for (auto& def : m_callstack_defs)
+					send_callstack(def.first, def.second.c_str());
+			}
+
 		public:
 			network_events_sink(network& network) : m_network(network) {}
 
-			virtual void report_alloc(uint64_t frame, uint64_t addr, uint32_t size, const char* full_name, const char* callstack) override
+			virtual void report_alloc(uint64_t frame, uint64_t addr, uint32_t size, uint32_t type_id, uint32_t callstack_id) override
 			{
 				if (!m_network.is_connected())
 					return;
 
+				update_definitions();
+
 				static std::vector<uint8_t> data;
-				data.reserve(5 * 1024);
+				data.reserve(64);
 				data.clear();
 				memory_writer writer(data);
 				writer.write_uint64(frame);
 				writer.write_uint64(addr);
 				writer.write_uint32(size);
-				writer.write_string(full_name);
-				writer.write_string(callstack);
+				writer.write_varint(type_id);
+				writer.write_varint(callstack_id);
 
 				m_network.write_message(protocol::message::SRV_ALLOC, (uint32_t)data.size(), (uint8_t*)&data[0]);
 			}
@@ -50,6 +105,8 @@ namespace owlcat
 			{
 				if (!m_network.is_connected())
 					return;
+
+				update_definitions();
 
 				static std::vector<uint8_t> data;
 				data.reserve(32);
@@ -60,6 +117,31 @@ namespace owlcat
 				writer.write_uint32(size);
 
 				m_network.write_message(protocol::message::SRV_FREE, (uint32_t)data.size(), (uint8_t*)&data[0]);
+			}
+
+			virtual void report_type(uint32_t type_id, const char* name) override
+			{
+				// Remember the definition even if not connected: a client connecting later
+				// must receive all definitions. Overwrite is intentional: the profiler may be
+				// restarted mid-session (e.g. StartProfiling called again) and re-assign ids.
+				m_type_defs[type_id] = name;
+
+				if (!m_network.is_connected())
+					return;
+
+				update_definitions();
+				send_type(type_id, name);
+			}
+
+			virtual void report_callstack(uint32_t callstack_id, const char* text) override
+			{
+				m_callstack_defs[callstack_id] = text;
+
+				if (!m_network.is_connected())
+					return;
+
+				update_definitions();
+				send_callstack(callstack_id, text);
 			}
 
 			virtual void report_references(uint64_t request_id, const std::vector<object_references_t>& references) override

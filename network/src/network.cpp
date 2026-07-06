@@ -1,5 +1,6 @@
 #include "network.h"
 
+#include <atomic>
 #include <deque>
 #include <thread>
 #include <mutex>
@@ -53,6 +54,8 @@ namespace owlcat
 
 		connection_status m_connected = connection_not_init;
 		bool m_listening = false;
+		// Incremented on every new connection. Read from other threads to detect reconnects.
+		std::atomic<uint64_t> m_generation{0};
 
 
 #ifdef DEBUG_NETWORK
@@ -156,6 +159,7 @@ namespace owlcat
 			
 			m_socket.non_blocking(true);
 			m_connected = connection_connected;
+			++m_generation;
 			// We only allow one connection at a time. Network user is responsible for restarting listening if connection is terminated
 			m_listening = false;
 
@@ -260,6 +264,11 @@ namespace owlcat
 			return m_acceptor.is_open() && m_listening;
 		}
 
+		uint64_t connection_generation() const
+		{
+			return m_generation;
+		}
+
 		void stop()
 		{		
 			m_stop = true;
@@ -338,6 +347,11 @@ namespace owlcat
 	bool network::is_listening() const
 	{
 		return m_details->is_listening();
+	}
+
+	uint64_t network::connection_generation() const
+	{
+		return m_details->connection_generation();
 	}
 
 	void network::stop()

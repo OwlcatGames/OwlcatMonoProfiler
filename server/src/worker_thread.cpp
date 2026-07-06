@@ -70,6 +70,90 @@ namespace owlcat
 #endif
 	}
 
+	const worker_thread::method_entry& worker_thread::resolve_method(MonoMethod* method)
+	{
+		auto iter = m_method_cache.find(method);
+		if (iter != m_method_cache.end())
+			return iter->second;
+
+		auto klass = method_get_class(method);
+
+		char method_name[2048];
+		snprintf(method_name, sizeof(method_name) - 1, "%s.%s\n", get_class_name(klass), get_method_name(method));
+
+		method_entry entry;
+		entry.text = method_name;
+		entry.stopword = false;
+		for (auto s : m_stopwords)
+		{
+			if (strstr(method_name, s) != nullptr)
+			{
+				entry.stopword = true;
+				break;
+			}
+		}
+
+		return m_method_cache.emplace(method, std::move(entry)).first->second;
+	}
+
+	uint32_t worker_thread::intern_type(MonoClass* klass)
+	{
+		auto iter = m_type_ids.find(klass);
+		if (iter != m_type_ids.end())
+			return iter->second;
+
+		char full_name[2048];
+		get_full_class_name(full_name, sizeof(full_name), klass);
+
+		uint32_t id = m_next_type_id++;
+		m_type_ids.emplace(klass, id);
+
+		// The definition must reach the client before any allocation that references it
+		m_events_sink->report_type(id, full_name);
+
+		return id;
+	}
+
+	const worker_thread::callstack_entry& worker_thread::intern_callstack(const std::vector<MonoMethod*>& methods)
+	{
+		auto iter = m_callstack_ids.find(methods);
+		if (iter != m_callstack_ids.end())
+			return iter->second;
+
+		// First time we see this callstack: resolve method names (cached by pointer)
+		// and build the full text
+		callstack_entry entry{ 0, false };
+
+		std::string backtrace_str;
+		backtrace_str.reserve(4096);
+
+		for (auto& method : methods)
+		{
+			const method_entry& resolved = resolve_method(method);
+			if (resolved.stopword)
+			{
+				entry.stopword = true;
+				break;
+			}
+
+			backtrace_str.append(resolved.text);
+		}
+
+		if (!entry.stopword)
+		{
+			// This mostly means objects allocated directly from native Unity code, like scene objects
+			if (methods.empty())
+				backtrace_str = "<no stack>";
+
+			entry.id = m_next_callstack_id++;
+
+			// The definition must reach the client before any allocation that references it
+			m_events_sink->report_callstack(entry.id, backtrace_str.c_str());
+		}
+
+		return m_callstack_ids.emplace(methods, entry).first->second;
+	}
+
 	/*
 		Main processing function. Dequeues events from queue, updates set of live allocations, and reports events to client
 	*/
@@ -98,46 +182,18 @@ namespace owlcat
 				continue;
 			}
 
-			// 1. ---------- Get full class name
+			// 1. ---------- Intern type and callstack. Names are resolved and definitions are
+			// reported to client only for types and callstacks seen for the first time;
+			// afterwards, it's a single hash lookup.
 
-			static char full_name[2048];
-			get_full_class_name(full_name, sizeof(full_name), item.klass);
+			uint32_t type_id = intern_type(item.klass);
 			
 
-			// 2. ---------- Get function names for callstack and check stop-list
+			const callstack_entry& callstack = intern_callstack(item.backtrace.backtrace);
 
-			static std::string backtrace_str;
-			backtrace_str.reserve(1024 * 10);
-			backtrace_str.clear();
-
-			bool stopword_met = false;
-			for (auto& bt_item : item.backtrace.backtrace)
-			{
-				auto klass = method_get_class(bt_item);
-
-				static char method_name[2048];
-				snprintf(method_name, sizeof(method_name)-1, "%s.%s\n", get_class_name(klass), get_method_name(bt_item));
-				for (auto s : m_stopwords)
-				{
-					if (strstr(method_name, s) != nullptr)
-					{
-						stopword_met = true;
-						break;
-					}
-				}
-
-				if (stopword_met)
-					break;
-
-				backtrace_str.append(method_name);
-			}
-
-			if (stopword_met)
+			// Allocations with stopworded callstacks are not tracked at all
+			if (callstack.stopword)
 				continue;
-
-			// This mostly means objects allocated directly from native Unity code, like scene objects
-			if (item.backtrace.backtrace.empty())
-				backtrace_str = "<no stack>";
 
 			auto addr = (uint64_t)item.obj;
 			auto addr_iter = m_allocations.find(addr);
@@ -164,7 +220,7 @@ namespace owlcat
 				alloc.size = item.size;
 			}
 
-			m_events_sink->report_alloc(item.frame, addr, item.size, full_name, backtrace_str.c_str());
+			m_events_sink->report_alloc(item.frame, addr, item.size, type_id, callstack.id);
 			m_allocated += item.size;
 		}
 

@@ -21,6 +21,10 @@ namespace owlcat
 			SRV_REFERENCES,
 			SRV_PAUSE,
 			SRV_RESUME,
+			// Definitions of type and callstack ids referenced by SRV_ALLOC messages.
+			// A definition is always sent before the first SRV_ALLOC that references it.
+			SRV_TYPE,
+			SRV_CALLSTACK,
 		};
 
 		enum command
@@ -84,6 +88,9 @@ uint32_t id;
 		bool is_connected() const;
 		bool is_connecting() const;
 		bool is_listening() const;
+
+		// Number of connections established so far. Can be used to detect reconnects.
+		uint64_t connection_generation() const;
 
 		void stop();
 
