@@ -5,8 +5,10 @@
 
 #include <thread>
 #include <string>
-#include <cassert>
 #include <cstring>
+#include <execution>
+#include <cassert>
+#include <type_traits>
 #include <mono/metadata/object.h>
 
 using namespace owlcat::mono_functions;
@@ -20,15 +22,28 @@ namespace owlcat
 	*/
 	mono_bool worker_thread::stack_backtrace::add_trace(MonoMethod* method, int32_t native_offset, int32_t il_offset, mono_bool managed)
 	{
-		backtrace.push_back(method);
+		if (count >= MAX_DEPTH)
+		{
+			overflow = true;
+			// Stop the walk: the frames would be dropped anyway. Only Mono honors the
+			// return value; IL2CPP's walk can't be interrupted, so there we just drop frames.
+			return 1;
+		}
+
+		frames[count++] = method;
 
 		return 0;
 	}
 
-	worker_thread::worker_thread(events_sink* sink)
+	worker_thread::worker_thread(events_sink* sink, logger* log)
 		: m_events_sink(sink)
 		, m_work_items_token(m_work_items)
+		, m_logger(log)
 	{
+		// The whole point of the fixed-size backtrace buffer is to keep work_item
+		// trivially copyable, so that enqueueing it never touches the heap
+		static_assert(std::is_trivially_copyable<work_item>::value, "work_item must stay trivially copyable");
+
 		//TODO: Allow to specify stopwords externally
 		m_stopwords.push_back("UberConsole");
 		m_stopwords.push_back("FPSCounter");
@@ -114,11 +129,23 @@ namespace owlcat
 		return id;
 	}
 
-	const worker_thread::callstack_entry& worker_thread::intern_callstack(const std::vector<MonoMethod*>& methods)
+	worker_thread::callstack_entry worker_thread::intern_callstack(const stack_backtrace& backtrace)
 	{
-		auto iter = m_callstack_ids.find(methods);
-		if (iter != m_callstack_ids.end())
-			return iter->second;
+		// FNV-1a over the raw pointer values
+		uint64_t hash = 14695981039346656037ULL;
+		for (uint32_t i = 0; i < backtrace.count; ++i)
+		{
+			hash ^= (uint64_t)backtrace.frames[i];
+			hash *= 1099511628211ULL;
+		}
+
+		auto& bucket = m_callstack_ids[hash];
+		for (auto& interned : bucket)
+		{
+			if (interned.methods.size() == backtrace.count &&
+				(backtrace.count == 0 || memcmp(interned.methods.data(), backtrace.frames, backtrace.count * sizeof(MonoMethod*)) == 0))
+				return interned.entry;
+		}
 
 		// First time we see this callstack: resolve method names (cached by pointer)
 		// and build the full text
@@ -127,9 +154,9 @@ namespace owlcat
 		std::string backtrace_str;
 		backtrace_str.reserve(4096);
 
-		for (auto& method : methods)
+		for (uint32_t i = 0; i < backtrace.count; ++i)
 		{
-			const method_entry& resolved = resolve_method(method);
+			const method_entry& resolved = resolve_method(backtrace.frames[i]);
 			if (resolved.stopword)
 			{
 				entry.stopword = true;
@@ -142,7 +169,7 @@ namespace owlcat
 		if (!entry.stopword)
 		{
 			// This mostly means objects allocated directly from native Unity code, like scene objects
-			if (methods.empty())
+			if (backtrace.count == 0)
 				backtrace_str = "<no stack>";
 
 			entry.id = m_next_callstack_id++;
@@ -151,7 +178,9 @@ namespace owlcat
 			m_events_sink->report_callstack(entry.id, backtrace_str.c_str());
 		}
 
-		return m_callstack_ids.emplace(methods, entry).first->second;
+		bucket.push_back({ std::vector<MonoMethod*>(backtrace.frames, backtrace.frames + backtrace.count), entry });
+
+		return entry;
 	}
 
 	/*
@@ -174,6 +203,26 @@ namespace owlcat
 				continue;
 			}
 
+			// Items from different game threads have no global ordering between them,
+			// so an item's frame can be slightly older than one we've already processed.
+			// Clamp it: the client requires monotonic frame numbers.
+			if (item.frame < m_max_seen_frame)
+				item.frame = m_max_seen_frame;
+			else
+				m_max_seen_frame = item.frame;
+
+			// Warn (once) if a callstack was truncated
+			if (item.backtrace.overflow && !m_overflow_logged)
+			{
+				m_overflow_logged = true;
+				if (m_logger)
+				{
+					char tmp[256];
+					snprintf(tmp, sizeof(tmp) - 1, "A callstack was deeper than %u frames and was truncated. This is only logged once.", (unsigned)stack_backtrace::MAX_DEPTH);
+					m_logger->log_str(tmp);
+				}
+			}
+
 			// Report free event to client
 			if (item.type == work_item_type::free)
 			{
@@ -189,7 +238,7 @@ namespace owlcat
 			uint32_t type_id = intern_type(item.klass);
 			
 
-			const callstack_entry& callstack = intern_callstack(item.backtrace.backtrace);
+			callstack_entry callstack = intern_callstack(item.backtrace);
 
 			// Allocations with stopworded callstacks are not tracked at all
 			if (callstack.stopword)
@@ -286,7 +335,9 @@ namespace owlcat
 				((stack_backtrace*)data)->add_trace(frame_info->method, 0, 0, true);
 			}, (void*)&item.backtrace);
 #endif
-		m_work_items.enqueue(m_work_items_token, item);
+		// No token: each game thread gets its own implicit producer inside the queue,
+		// so allocating threads don't synchronize with each other at all
+		m_work_items.enqueue(item);
 	}
 
 	// It is possible that the memory pointed to by addr is no longer accessible to us.
@@ -544,20 +595,27 @@ namespace owlcat
 
 	void worker_thread::find_references(uint64_t request_id, const std::vector<uint64_t>& addresses, uint64_t frame)
 	{
-		// List of references/parents is only updated during a call to GC. If the last time the GC was called
-		// is not in current frame, we need to update list of parents for all objects. But we set the second argument
-		// to true to avoid actually removing any objects and reporting free events to client
-		if (frame > m_last_gc_frame)
-			do_gc_sync(frame, true);
-
-		// When the app is paused, we don't need any locks
+		// When the app is paused, allocations are already blocked, and we don't need any locks
 		if (m_stop_lock.owns_lock())
 		{
+			// List of references/parents is only updated during a call to GC. If the last time the GC was called
+			// is not in current frame, we need to update list of parents for all objects. But we set the second argument
+			// to true to avoid actually removing any objects and reporting free events to client
+			if (frame > m_last_gc_frame)
+				do_gc_sync(frame, true);
+
 			find_references_internal(request_id, addresses);
 		}
-		// When the app is not paused, we need to hold locks, or the list of allocations can change during find_references_internal call
+		// When the app is not paused, block allocation reporting the same way pause_app does:
+		// otherwise the work queue might never drain in do_gc_sync while the game keeps
+		// allocating, and the list of allocations could change while we walk it
 		else
 		{
+			std::unique_lock<std::shared_mutex> quiesce_lock(m_stop_mutex);
+
+			if (frame > m_last_gc_frame)
+				do_gc_sync(frame, true);
+
 			std::scoped_lock gc_lock(m_gc_mutex);
 			std::scoped_lock roots_lock(m_roots_mutex);
 			find_references_internal(request_id, addresses);

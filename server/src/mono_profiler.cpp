@@ -1,5 +1,6 @@
 #include <iostream>
 #include <queue>
+#include <atomic>
 #include <mutex>
 #include <chrono>
 
@@ -62,23 +63,20 @@ namespace owlcat
 		// A sink for reporting events to client. mono_profiler_server is reponsible for creating and destroying it
 		events_sink* m_events_sink;
 
-		// Current frame
-		uint64_t m_frame_index = 0;
-
-		// A mutex to prevent two allocations being reported concurrently from different threads (this leads to wrong frame number order in sequential allocations)
-		std::mutex m_add_alloc_mutex;
+		// Current frame. Atomic: written by the frame callback, read by allocation callbacks on any thread
+		std::atomic<uint64_t> m_frame_index = 0;
 
 	private:
 		void on_shutdown()
 		{
 		}
 
-		// Callback for allocation events
+		// Callback for allocation events. Called concurrently from any of the game's threads:
+		// the queue in worker_thread is multi-producer, and the worker keeps frame numbers
+		// monotonic itself, so no lock is needed here
 		void on_allocation(MonoObject* obj, MonoClass* klass)
 		{
-			std::scoped_lock items_lock(m_add_alloc_mutex);
-
-			m_processing_thread->add_allocation_async(m_frame_index, klass, obj);
+			m_processing_thread->add_allocation_async(m_frame_index.load(std::memory_order_relaxed), klass, obj);
 		}
 
 		// Callback for GC events
@@ -135,7 +133,7 @@ namespace owlcat
 
 			m_logger.log_str("restarting profiling");
 			m_processing_thread->stop();
-			m_processing_thread = std::make_unique<worker_thread>(m_events_sink);
+			m_processing_thread = std::make_unique<worker_thread>(m_events_sink, &m_logger);
 			m_processing_thread->start();
 
 			return true;
@@ -247,7 +245,7 @@ namespace owlcat
 				});
 #endif
 			// 7. Start worker thread that stores allocations in memory (it does a lot of heavy lifting with strings and containers, so we run it in another thread)
-			m_processing_thread = std::make_unique<worker_thread>(m_events_sink);
+			m_processing_thread = std::make_unique<worker_thread>(m_events_sink, &m_logger);
 			m_processing_thread->start();
 		}
 	};
@@ -308,15 +306,8 @@ namespace owlcat
 
 	void mono_profiler::find_references(uint64_t request_id, const std::vector<uint64_t>& addresses)
 	{
-		if (m_details->m_processing_thread->is_paused())
-		{
-			m_details->m_processing_thread->find_references(request_id, addresses, m_details->m_frame_index);
-		}
-		else
-		{
-			std::scoped_lock items_lock(m_details->m_add_alloc_mutex);
-			m_details->m_processing_thread->find_references(request_id, addresses, m_details->m_frame_index);
-		}
+		// worker_thread blocks allocation reporting itself if the app is not paused
+		m_details->m_processing_thread->find_references(request_id, addresses, m_details->m_frame_index);
 	}
 
 	void mono_profiler::pause_app(uint64_t request_id)

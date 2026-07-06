@@ -3,6 +3,7 @@
 #include "mono/metadata/profiler.h"
 #include <vector>
 #include <string>
+#include <atomic>
 #include <thread>
 #include <mutex>
 #include <shared_mutex>
@@ -86,6 +87,7 @@ bool operator!= (const counting_allocator<T1>&,
 namespace owlcat
 {
 	class events_sink;
+	class logger;
 
 	/*
 		Worker thread that stores current list of live allocations and handles
@@ -106,19 +108,21 @@ namespace owlcat
 		uint64_t m_freed = 0;
 
 		/*
-			Callstack storage
+			Callstack storage. A fixed-size buffer, so that work_item is trivially copyable
+			and enqueueing it never touches the heap on the game's threads.
 		*/
 		struct stack_backtrace
 		{
-			stack_backtrace()
-			{
-				backtrace.reserve(32);
-			}
+			// Hard safety cap. Stacks deeper than this are truncated: the innermost
+			// MAX_DEPTH frames are kept, and the truncation is logged (once).
+			static constexpr size_t MAX_DEPTH = 64;
 
 			mono_bool add_trace(MonoMethod* method, int32_t native_offset, int32_t il_offset, mono_bool managed);
 
-			std::vector<MonoMethod*> backtrace;
-			bool stopword_met = false;
+			MonoMethod* frames[MAX_DEPTH];
+			uint32_t count = 0;
+			// True if frames beyond MAX_DEPTH were dropped
+			bool overflow = false;
 		};
 
 		enum class work_item_type : uint8_t {alloc, free};
@@ -146,15 +150,19 @@ namespace owlcat
 		*/
 		moodycamel::ConcurrentQueue<work_item> m_work_items;
 		/*
-			Token use to make events reported from different treads appear in correct sequence
-			(see "High-level design" section of https://github.com/cameron314/concurrentqueue)
+			Token for events enqueued by the profiler itself (free events from the pseudo-GC).
+			Allocations from the game's threads are enqueued without a token: each thread then
+			gets its own implicit producer inside the queue, so allocating threads never
+			synchronize with each other. Per-thread ordering is preserved; global frame
+			ordering across threads is restored by the clamp in do_work (see m_max_seen_frame).
 		*/
 		moodycamel::ProducerToken m_work_items_token;
 		/*
-			ConcurrentQueue doesn't support any way to check if it is empty, so here's a bool
-			that the worker thread sets when it failed to dequeue an item.
+			ConcurrentQueue doesn't support any way to check if it is empty, so here's a flag
+			that the worker thread sets when it failed to dequeue an item. Atomic, because
+			do_gc_sync spins on it from other threads.
 		*/
-		bool m_work_items_empty = true;
+		std::atomic<bool> m_work_items_empty = true;
 		/*
 			A pointer to a sink used to report events to client
 		*/
@@ -274,29 +282,29 @@ namespace owlcat
 		std::unordered_map<MonoClass*, uint32_t> m_type_ids;
 		uint32_t m_next_type_id = 0;
 
-		struct methods_hash
-		{
-			size_t operator()(const std::vector<MonoMethod*>& methods) const
-			{
-				// FNV-1a over the raw pointer values
-				size_t hash = 14695981039346656037ULL;
-				for (auto method : methods)
-				{
-					hash ^= (size_t)method;
-					hash *= 1099511628211ULL;
-				}
-				return hash;
-			}
-		};
 		struct callstack_entry
 		{
 			uint32_t id;
 			// Callstacks that contain a stopword are never reported, and neither are allocations made with them
 			bool stopword;
 		};
-		// Callstacks already reported to client, keyed by the raw sequence of methods
-		std::unordered_map<std::vector<MonoMethod*>, callstack_entry, methods_hash> m_callstack_ids;
+		// One unique interned callstack: the method sequence (kept for equality checks) and its entry
+		struct interned_callstack
+		{
+			std::vector<MonoMethod*> methods;
+			callstack_entry entry;
+		};
+		// Callstacks already reported to client, keyed by a hash of the method sequence.
+		// The bucket vector resolves hash collisions between different sequences.
+		std::unordered_map<uint64_t, std::vector<interned_callstack>> m_callstack_ids;
 		uint32_t m_next_callstack_id = 0;
+
+		// Highest frame seen in dequeued items so far; used to keep reported frames monotonic
+		uint64_t m_max_seen_frame = 0;
+		// True if we already logged that some callstack was truncated
+		bool m_overflow_logged = false;
+		// Logger, owned by mono_profiler
+		logger* m_logger = nullptr;
 
 	private:
 		// Main processing function
@@ -307,7 +315,7 @@ namespace owlcat
 		// Returns an id for the type, reporting a definition to the client on first sight
 		uint32_t intern_type(MonoClass* klass);
 		// Returns interned info for a callstack, reporting a definition to the client on first sight
-		const callstack_entry& intern_callstack(const std::vector<MonoMethod*>& methods);
+		callstack_entry intern_callstack(const stack_backtrace& backtrace);
 
 		/*
 			This function performs pseoud-GC on our list of allocations to mark all live objects
@@ -326,7 +334,7 @@ namespace owlcat
 		void find_references_internal(uint64_t request_id, const std::vector<uint64_t>& addresses);
 
 	public:
-		worker_thread(events_sink* sink);
+		worker_thread(events_sink* sink, logger* log);
 		~worker_thread();		
 
 		// Starts the thread
