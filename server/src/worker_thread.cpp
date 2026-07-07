@@ -288,7 +288,10 @@ namespace owlcat
 	{
 		// Unpause the app if it was paused
 		if (m_stop_lock.owns_lock())
+		{
+			m_allocs_blocked = false;
 			m_stop_lock.unlock();
+		}
 
 		m_stop = true;
 		if (m_thread.joinable())
@@ -297,7 +300,15 @@ namespace owlcat
 
 	void worker_thread::add_allocation_async(uint64_t frame, MonoClass* klass, MonoObject* obj)
 	{
-		std::shared_lock stop_lock(m_stop_mutex);
+		// Pause gate. Taking m_stop_mutex in shared mode on every allocation is an atomic
+		// RMW on a shared cache line, so the common case checks a simple flag instead.
+		// The flag is advisory: an allocation racing with pause_app can slip through once,
+		// which only means the pause takes effect on that thread's next allocation.
+		if (m_allocs_blocked.load(std::memory_order_relaxed))
+		{
+			// Block until the pause or the references query ends
+			std::shared_lock stop_lock(m_stop_mutex);
+		}
 		//fprintf(m_alloc_loc, "%p\n", obj);
 		//fflush(m_alloc_loc);
 
@@ -369,6 +380,8 @@ namespace owlcat
 		std::scoped_lock gc_lock(m_gc_mutex);
 		std::scoped_lock roots_lock(m_roots_mutex);
 
+		++m_gc_generation;
+
 		m_stack.reserve(1024 * 1024);
 		m_stack.clear();
 
@@ -379,7 +392,10 @@ namespace owlcat
 			alloc.reset_flag(alloc_info::flag::TMP_ALLOCATED);
 			alloc.reset_flag(alloc_info::flag::IS_ROOT);
 			alloc.reset_flag(alloc_info::flag::TMP_VISITED);
-			alloc.parents.clear();
+			// Parents are only needed by find_references, so a normal collection
+			// doesn't pay for maintaining them
+			if (only_update_parents)
+				alloc.parents.clear();
 #ifdef DEBUG_ALLOCS
 			iter.second.parent = nullptr;
 #endif
@@ -431,7 +447,8 @@ namespace owlcat
 				if (iter != m_allocations.end())
 				{
 					auto& alloc = alloc_value(iter);
-					alloc.parents.push_back(entry.addr);
+					if (only_update_parents)
+						alloc.parents.push_back(entry.addr);
 					if (!iter->second.flag(alloc_info::flag::TMP_ALLOCATED))
 					{
 						alloc.reset_flag(alloc_info::flag::IS_ROOT);
@@ -472,6 +489,10 @@ namespace owlcat
 					++iter;
 			}
 		}
+
+		// Parents are now up to date with the object graph as of this pass
+		if (only_update_parents)
+			m_parents_generation = m_gc_generation.load();
 
 		return iterations;
 	}
@@ -523,10 +544,7 @@ namespace owlcat
 		while (!m_work_items_empty)
 			std::this_thread::yield();		
 		
-		int r = do_gc_internal(frame, only_update_parents);
-
-		m_last_gc_frame = frame;
-		return r;
+		return do_gc_internal(frame, only_update_parents);
 	}
 
 	void worker_thread::register_root(const char* start, uint64_t size)
@@ -551,6 +569,11 @@ namespace owlcat
 	void worker_thread::find_references_internal(uint64_t request_id, const std::vector<uint64_t>& addresses)
 	{
 		std::vector<object_references_t> filtered_results;
+
+		// Clear the "visited" marks possibly left over from a previous query (a parents-building
+		// GC pass also clears them, but it doesn't necessarily run for every query)
+		for (auto iter = m_allocations.begin(); iter != m_allocations.end(); ++iter)
+			alloc_value(iter).reset_flag(alloc_info::flag::TMP_VISITED);
 
 		// Stack of addresses to process
 		std::vector<uint64_t> interesting_addresses = addresses;
@@ -578,9 +601,12 @@ namespace owlcat
 				// Push all object's parents onto stack
 				for (auto& parent : iter->second.parents)
 				{
-					// Check if we already have information about this object. It would be faster to mark the object somehow, but we don't want to spare the memory
 					auto check_iter = m_allocations.find(parent);
-					if (check_iter != m_allocations.end() && alloc_value(check_iter).flag(alloc_info::flag::TMP_VISITED))
+					// The parent may have been freed by a GC pass after the parents list was built
+					if (check_iter == m_allocations.end())
+						continue;
+					// Skip parents we have already seen
+					if (alloc_value(check_iter).flag(alloc_info::flag::TMP_VISITED))
 						continue;
 
 					alloc_value(check_iter).set_flag(alloc_info::flag::TMP_VISITED);
@@ -598,10 +624,11 @@ namespace owlcat
 		// When the app is paused, allocations are already blocked, and we don't need any locks
 		if (m_stop_lock.owns_lock())
 		{
-			// List of references/parents is only updated during a call to GC. If the last time the GC was called
-			// is not in current frame, we need to update list of parents for all objects. But we set the second argument
-			// to true to avoid actually removing any objects and reporting free events to client
-			if (frame > m_last_gc_frame)
+			// Parents lists are only built by a parents-building pass (a normal collection
+			// skips them for speed), so rebuild them if any GC pass ran since the last rebuild.
+			// The pass sets only_update_parents to true to avoid actually removing any objects
+			// and reporting free events to client.
+			if (m_parents_generation != m_gc_generation)
 				do_gc_sync(frame, true);
 
 			find_references_internal(request_id, addresses);
@@ -612,13 +639,18 @@ namespace owlcat
 		else
 		{
 			std::unique_lock<std::shared_mutex> quiesce_lock(m_stop_mutex);
+			m_allocs_blocked = true;
 
-			if (frame > m_last_gc_frame)
+			if (m_parents_generation != m_gc_generation)
 				do_gc_sync(frame, true);
 
-			std::scoped_lock gc_lock(m_gc_mutex);
-			std::scoped_lock roots_lock(m_roots_mutex);
-			find_references_internal(request_id, addresses);
+			{
+				std::scoped_lock gc_lock(m_gc_mutex);
+				std::scoped_lock roots_lock(m_roots_mutex);
+				find_references_internal(request_id, addresses);
+			}
+
+			m_allocs_blocked = false;
 		}
 	}
 
@@ -634,6 +666,7 @@ namespace owlcat
 		if (!m_stop_lock.owns_lock())
 		{
 			m_stop_lock = std::unique_lock<std::shared_mutex>(m_stop_mutex);
+			m_allocs_blocked = true;
 		}
 
 		m_events_sink->report_paused(request_id, true);
@@ -646,6 +679,7 @@ namespace owlcat
 	{
 		if (m_stop_lock.owns_lock())
 		{
+			m_allocs_blocked = false;
 			m_stop_lock.unlock();
 			m_stop_lock.release();
 		}

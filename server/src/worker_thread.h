@@ -172,11 +172,14 @@ namespace owlcat
 		*/
 		bool m_stop = false;
 		/*
-			Last frame when GC was performed. When client wants to find references to an object,
-			we check this variable and the current frame to see if list of parents needs to be
-			updated
+			Generation counters used to decide if the parents lists are up to date.
+			m_gc_generation is incremented by every GC pass; a parents-building pass
+			(only_update_parents == true) also sets m_parents_generation to the new value.
+			Parents are stale whenever the two differ. Atomic, because find_references
+			reads them from another thread.
 		*/
-		uint64_t m_last_gc_frame = 0;
+		std::atomic<uint64_t> m_gc_generation = 0;
+		std::atomic<uint64_t> m_parents_generation = (uint64_t)-1;
 
 		/*
 			Thread itself
@@ -196,6 +199,12 @@ namespace owlcat
 		*/
 		std::shared_mutex m_stop_mutex;
 		std::unique_lock<std::shared_mutex> m_stop_lock;
+		/*
+			True while allocations must block on m_stop_mutex (app pause, or a references
+			query in progress). Checked on every allocation instead of always taking the
+			shared lock, which would be an atomic RMW on a shared cache line.
+		*/
+		std::atomic<bool> m_allocs_blocked = false;
 
 		/*
 			Information about a single allocation
@@ -207,6 +216,8 @@ namespace owlcat
 			// A set of flags, temporary and permanent for this allocation
 			uint8_t flags;
 			// List of objects that refer to this allocation.
+			// Only filled during a parents-building GC pass (only_update_parents == true),
+			// because it is only ever read by find_references.
 			// TODO: Optimize this, it takes about 30 bytes even when empty, and a lot of objects only have 1 or 2 references
 			std::vector<uint64_t, counting_allocator<uint64_t>> parents;
 #ifdef DEBUG_ALLOCS			

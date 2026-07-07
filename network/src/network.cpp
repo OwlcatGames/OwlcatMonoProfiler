@@ -1,6 +1,7 @@
 #include "network.h"
 
 #include <atomic>
+#include <cstring>
 #include <deque>
 #include <thread>
 #include <mutex>
@@ -56,6 +57,21 @@ namespace owlcat
 		bool m_listening = false;
 		// Incremented on every new connection. Read from other threads to detect reconnects.
 		std::atomic<uint64_t> m_generation{0};
+
+		/*
+			Writing is batched: write_message only appends the message to m_pending_writes,
+			and at most one async_write is in flight at any time (overlapping async_writes
+			on one socket are not allowed by ASIO anyway). When a write completes, everything
+			that accumulated in the meantime is sent as one buffer. This turns thousands of
+			tiny per-event writes per frame into a few large ones.
+		*/
+		std::mutex m_write_mutex;
+		// Messages accumulated while the current write is in flight
+		std::vector<uint8_t> m_pending_writes;
+		// The buffer currently being sent
+		std::vector<uint8_t> m_writing;
+		// True if an async_write is in flight
+		bool m_write_in_progress = false;
 
 
 #ifdef DEBUG_NETWORK
@@ -166,21 +182,38 @@ namespace owlcat
 			read_message_header_from_socket();
 		}
 
-		void on_message_written(std::shared_ptr<message> msg, const asio::error_code& ec, size_t write_size)
+		// Starts sending everything accumulated in m_pending_writes.
+		// Called on the network thread only.
+		void start_write()
 		{
-#ifdef DEBUG_NETWORK
-#ifdef DEBUG_NETWORK_TEXT
-			fprintf(m_debug_file, "Header: %i (%i) type=%i length=%i\n", write_count++, (msg->header.id), msg->header.type, msg->header.length);
-			fprintf(m_debug_file, "Body: length=%I64u\n", msg->data.size());
-			fwrite(msg->data.data(), msg->data.size(), 1, m_debug_file);
-			fprintf(m_debug_file, "\n");
-#else
-			fwrite(&msg->header, sizeof(msg->header), 1, m_debug_file);
-			fwrite(msg->data.data(), msg->data.size(), 1, m_debug_file);
-#endif
-			fflush(m_debug_file);
-#endif
-			set_disconnected_status(ec);
+			{
+				std::scoped_lock lock(m_write_mutex);
+				m_writing.clear();
+				if (m_pending_writes.empty())
+				{
+					m_write_in_progress = false;
+					return;
+				}
+				m_writing.swap(m_pending_writes);
+			}
+
+			asio::async_write(m_socket, asio::buffer(m_writing.data(), m_writing.size()), [this](const asio::error_code& ec, size_t) { on_write_complete(ec); });
+		}
+
+		void on_write_complete(const asio::error_code& ec)
+		{
+			if (ec)
+			{
+				set_disconnected_status(ec);
+
+				std::scoped_lock lock(m_write_mutex);
+				m_write_in_progress = false;
+				m_pending_writes.clear();
+				return;
+			}
+
+			// Send whatever has accumulated while this write was in flight
+			start_write();
 		}
 
 	public:
@@ -200,6 +233,11 @@ namespace owlcat
 
 		void listen_async(int port)
 		{
+			// stop() might have been called before (e.g. when restarting listening after
+			// a disconnect), so reset the stop flag and the context
+			m_stop = false;
+			m_context.restart();
+
 			m_listening = true;
 
 			m_endpoint = asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port);
@@ -214,6 +252,11 @@ namespace owlcat
 
 		void listen_sync(int port)
 		{
+			// stop() might have been called before (e.g. when restarting listening after
+			// a disconnect), so reset the stop flag and the context
+			m_stop = false;
+			m_context.restart();
+
 			m_listening = true;
 
 			m_endpoint = asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port);
@@ -231,6 +274,10 @@ namespace owlcat
 		
 		bool connect(const std::string& address, int port)
 		{
+			// stop() might have been called before, so reset the stop flag and the context
+			m_stop = false;
+			m_context.restart();
+
 			m_endpoint = asio::ip::tcp::endpoint(asio::ip::make_address(address), port);
 
 			asio::error_code ec;
@@ -270,13 +317,23 @@ namespace owlcat
 		}
 
 		void stop()
-		{		
+		{
 			m_stop = true;
 			if (m_thread.joinable())
 				m_thread.join();
 
 			m_socket.close();
 			m_acceptor.close();
+
+			// Run down any handlers that are still queued (e.g. cancelled writes),
+			// so they can't fire during the next session. The network thread is
+			// stopped, so it's safe to do it here.
+			m_context.restart();
+			m_context.poll();
+
+			m_write_in_progress = false;
+			m_pending_writes.clear();
+			m_writing.clear();
 
 			m_connected = connection_not_init;
 		}
@@ -286,16 +343,35 @@ namespace owlcat
 			if (!m_socket.is_open())
 				return;
 
-			std::shared_ptr<message> msg = std::make_shared<message>(type, length, data);
-			
-			assert(msg->data.size() > 0);
+			assert(length > 0);
 
-			std::vector<asio::const_buffer> buffers{ asio::const_buffer(&msg->header, sizeof(message::header)), asio::const_buffer(msg->data.data(), msg->data.size()) };
+			bool kick_writer = false;
+			{
+				std::scoped_lock lock(m_write_mutex);
 
-			asio::async_write(m_socket, buffers, [this, msg](auto& ec, auto size) {/*on_message_written(msg, ec, size);*/ });
+				// "struct" is required: message has both a nested type and a member named "header"
+				struct message::header hdr{};
+#ifdef DEBUG_NETWORK
+				hdr.id = message::next_id++;
+#endif
+				hdr.length = length;
+				hdr.type = type;
 
-			//asio::async_write(m_socket, asio::buffer(&msg->header, sizeof(message::header)), [this, msg](auto& ec, auto size) {/*on_message_written(msg, ec, size);*/ });
-			//asio::async_write(m_socket, asio::buffer(msg->data.data(), msg->data.size()), [this, msg](auto& ec, auto size) {on_message_written(msg, ec, size); });
+				size_t old_size = m_pending_writes.size();
+				m_pending_writes.resize(old_size + sizeof(hdr) + length);
+				memcpy(m_pending_writes.data() + old_size, &hdr, sizeof(hdr));
+				memcpy(m_pending_writes.data() + old_size + sizeof(hdr), data, length);
+
+				if (!m_write_in_progress)
+				{
+					m_write_in_progress = true;
+					kick_writer = true;
+				}
+			}
+
+			// All socket operations must happen on the network thread
+			if (kick_writer)
+				asio::post(m_context, [this]() { start_write(); });
 		}
 
 		bool read_message(message& msg)
