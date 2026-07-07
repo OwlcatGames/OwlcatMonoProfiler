@@ -3,6 +3,7 @@
 #include <atomic>
 #include <mutex>
 #include <chrono>
+#include <cstdlib>
 
 #include "mono/metadata/profiler.h"
 
@@ -65,6 +66,10 @@ namespace owlcat
 
 		// Current frame. Atomic: written by the frame callback, read by allocation callbacks on any thread
 		std::atomic<uint64_t> m_frame_index = 0;
+
+		// If true, the worker thread captures callstacks as raw instruction pointers
+		// instead of walking the stack with mono_stack_walk (see choose_backtrace_mode)
+		bool m_use_ip_capture = false;
 
 	private:
 		void on_shutdown()
@@ -133,7 +138,7 @@ namespace owlcat
 
 			m_logger.log_str("restarting profiling");
 			m_processing_thread->stop();
-			m_processing_thread = std::make_unique<worker_thread>(m_events_sink, &m_logger);
+			m_processing_thread = std::make_unique<worker_thread>(m_events_sink, &m_logger, m_use_ip_capture);
 			m_processing_thread->start();
 
 			return true;
@@ -164,6 +169,39 @@ namespace owlcat
 				//end_liveness_calculation.init(module_mono, m_logger) &&
 				//calculate_liveness_from_statics.init(module_mono, m_logger) &&
 				true;
+		}
+
+		/*
+			Decides how allocation callstacks are captured. On Windows with Mono we prefer
+			capturing raw instruction pointers (RtlCaptureStackBackTrace): it is much cheaper
+			than mono_stack_walk, which performs a jit info table lookup for every frame on
+			the allocating thread. The raw pointers are resolved to names lazily on the worker
+			thread, once per unique address. See worker_thread::add_allocation_async and
+			worker_thread::intern_callstack.
+		*/
+		void choose_backtrace_mode()
+		{
+			m_use_ip_capture = false;
+#if defined(WIN32) && OWLCAT_MONO
+			library* module_mono = m_module_mono.get();
+
+			// These functions are only needed for the fast path: if any of them is missing,
+			// we just fall back to mono_stack_walk
+			bool jit_functions_ok =
+				domain_get.init(module_mono, m_logger) &&
+				get_root_domain.init(module_mono, m_logger) &&
+				jit_info_table_find.init(module_mono, m_logger) &&
+				jit_info_get_method.init(module_mono, m_logger);
+
+			// Escape hatch, in case native unwinding doesn't work with some version of Mono
+			bool force_mono_walk = getenv("OWLCAT_PROFILER_MONO_WALK") != nullptr;
+
+			m_use_ip_capture = jit_functions_ok && !force_mono_walk;
+
+			m_logger.log_str(m_use_ip_capture
+				? "Callstack capture: raw instruction pointers (set OWLCAT_PROFILER_MONO_WALK env var to force mono_stack_walk)"
+				: "Callstack capture: mono_stack_walk");
+#endif
 		}
 
 		void init(mono_profiler* profiler)
@@ -245,7 +283,7 @@ namespace owlcat
 				});
 #endif
 			// 7. Start worker thread that stores allocations in memory (it does a lot of heavy lifting with strings and containers, so we run it in another thread)
-			m_processing_thread = std::make_unique<worker_thread>(m_events_sink, &m_logger);
+			m_processing_thread = std::make_unique<worker_thread>(m_events_sink, &m_logger, m_use_ip_capture);
 			m_processing_thread->start();
 		}
 	};
@@ -289,6 +327,8 @@ namespace owlcat
 		{
 			return false;
 		}
+
+		m_details->choose_backtrace_mode();
 
 		m_details->init(this);
 

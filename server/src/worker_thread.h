@@ -119,7 +119,10 @@ namespace owlcat
 
 			mono_bool add_trace(MonoMethod* method, int32_t native_offset, int32_t il_offset, mono_bool managed);
 
-			MonoMethod* frames[MAX_DEPTH];
+			// Either MonoMethod* pointers (mono_stack_walk / IL2CPP walk), or raw instruction
+			// pointers (native capture on Windows + Mono). The mode is fixed for the lifetime
+			// of the worker, so the two kinds never mix within one session.
+			void* frames[MAX_DEPTH];
 			uint32_t count = 0;
 			// True if frames beyond MAX_DEPTH were dropped
 			bool overflow = false;
@@ -299,10 +302,10 @@ namespace owlcat
 			// Callstacks that contain a stopword are never reported, and neither are allocations made with them
 			bool stopword;
 		};
-		// One unique interned callstack: the method sequence (kept for equality checks) and its entry
+		// One unique interned callstack: the frame sequence (kept for equality checks) and its entry
 		struct interned_callstack
 		{
-			std::vector<MonoMethod*> methods;
+			std::vector<void*> frames;
 			callstack_entry entry;
 		};
 		// Callstacks already reported to client, keyed by a hash of the method sequence.
@@ -317,12 +320,48 @@ namespace owlcat
 		// Logger, owned by mono_profiler
 		logger* m_logger = nullptr;
 
+		// True if backtraces contain raw instruction pointers captured natively, instead
+		// of MonoMethod* pointers from mono_stack_walk (decided once at profiler start,
+		// see mono_profiler::details::choose_backtrace_mode)
+		bool m_capture_raw_ips = false;
+
+#if defined(WIN32) && OWLCAT_MONO
+		// A resolved instruction pointer: either a managed method line, or a native module+offset line
+		struct ip_entry
+		{
+			std::string text;
+			bool stopword = false;
+			// True for addresses inside the profiler or the Mono runtime itself. Such frames
+			// at the top of a stack are the allocation machinery, and are skipped.
+			bool runtime_internal = false;
+			// True if the address resolved to a managed method
+			bool managed = false;
+		};
+		std::unordered_map<void*, ip_entry> m_ip_cache;
+
+		// The domain used for jit info lookups. Captured on the game's threads (which are
+		// attached to the runtime), used on the worker thread.
+		std::atomic<void*> m_jit_domain{nullptr};
+
+		// Statistics to diagnose broken native unwinding (logged periodically):
+		// if unwinding can't cross jit code, no callstack will contain managed frames,
+		// and the average frame count will be very low
+		uint64_t m_unique_ip_stacks = 0;
+		uint64_t m_unique_ip_stacks_with_managed = 0;
+		uint64_t m_unique_ip_frames = 0;
+#endif
+
 	private:
 		// Main processing function
 		void do_work();
 
 		// Resolves a method name via Mono functions, caching the result by method pointer
 		const method_entry& resolve_method(MonoMethod* method);
+#if defined(WIN32) && OWLCAT_MONO
+		// Resolves a raw instruction pointer to a managed method or a native module+offset,
+		// caching the result by address
+		const ip_entry& resolve_ip(void* ip);
+#endif
 		// Returns an id for the type, reporting a definition to the client on first sight
 		uint32_t intern_type(MonoClass* klass);
 		// Returns interned info for a callstack, reporting a definition to the client on first sight
@@ -345,7 +384,7 @@ namespace owlcat
 		void find_references_internal(uint64_t request_id, const std::vector<uint64_t>& addresses);
 
 	public:
-		worker_thread(events_sink* sink, logger* log);
+		worker_thread(events_sink* sink, logger* log, bool capture_raw_ips);
 		~worker_thread();		
 
 		// Starts the thread

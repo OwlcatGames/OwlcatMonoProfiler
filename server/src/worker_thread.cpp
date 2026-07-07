@@ -35,10 +35,11 @@ namespace owlcat
 		return 0;
 	}
 
-	worker_thread::worker_thread(events_sink* sink, logger* log)
+	worker_thread::worker_thread(events_sink* sink, logger* log, bool capture_raw_ips)
 		: m_events_sink(sink)
 		, m_work_items_token(m_work_items)
 		, m_logger(log)
+		, m_capture_raw_ips(capture_raw_ips)
 	{
 		// The whole point of the fixed-size backtrace buffer is to keep work_item
 		// trivially copyable, so that enqueueing it never touches the heap
@@ -129,6 +130,174 @@ namespace owlcat
 		return id;
 	}
 
+#if defined(WIN32) && OWLCAT_MONO
+	/*
+		Captures raw instruction pointers of the current callstack.
+
+		RtlCaptureStackBackTrace can't be used here: for speed and lock-safety it only
+		consults the static unwind tables of loaded modules, so it stops at the first
+		jit-compiled (managed) frame. Instead, we unwind manually:
+		- frames that have unwind info (native module code, and jit code if the runtime
+		  registered dynamic function tables) are unwound with RtlVirtualUnwind;
+		- jit frames without unwind info are unwound by following the RBP chain - Mono's
+		  JIT emits standard "push rbp; mov rbp, rsp" frames on Windows x64. If a frame
+		  omits the frame pointer, the chain skips it (or stops at the sanity checks).
+	*/
+	static void capture_stack_impl(void** frames, uint32_t max_depth, uint32_t* count)
+	{
+		CONTEXT ctx;
+		RtlCaptureContext(&ctx);
+
+		// Stack bounds of the current thread, for validating the RBP chain
+		NT_TIB* tib = (NT_TIB*)NtCurrentTeb();
+		uint64_t stack_base = (uint64_t)tib->StackBase;
+
+		while (*count < max_depth)
+		{
+			if (ctx.Rip == 0)
+				break;
+
+			frames[(*count)++] = (void*)ctx.Rip;
+
+			uint64_t image_base = 0;
+			RUNTIME_FUNCTION* function = RtlLookupFunctionEntry(ctx.Rip, &image_base, nullptr);
+			if (function != nullptr)
+			{
+				// A frame with proper unwind info
+				void* handler_data = nullptr;
+				uint64_t establisher_frame = 0;
+				uint64_t prev_rsp = ctx.Rsp;
+				RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, ctx.Rip, function, &ctx, &handler_data, &establisher_frame, nullptr);
+
+				// The stack must strictly grow upwards while unwinding
+				if (ctx.Rsp <= prev_rsp)
+					break;
+			}
+			else
+			{
+				// No unwind info: a jit-compiled managed frame or a trampoline.
+				// Follow the RBP chain: [rbp] = caller's rbp, [rbp+8] = return address.
+				uint64_t rbp = ctx.Rbp;
+				if (rbp < ctx.Rsp || rbp + 16 > stack_base || (rbp & 7) != 0)
+					break;
+
+				ctx.Rip = *(uint64_t*)(rbp + 8);
+				ctx.Rsp = rbp + 16;
+				ctx.Rbp = *(uint64_t*)rbp;
+			}
+		}
+	}
+
+	static uint32_t capture_stack(void** frames, uint32_t max_depth)
+	{
+		uint32_t count = 0;
+
+		// The RBP chain can contain garbage (e.g. if a jit frame omitted the frame
+		// pointer after all): if a read faults, just keep the frames collected so far
+		__try
+		{
+			capture_stack_impl(frames, max_depth, &count);
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+		}
+
+		return count;
+	}
+
+	// Returns the module of the profiler DLL itself
+	static HMODULE own_module()
+	{
+		static HMODULE module = []()
+		{
+			HMODULE m = nullptr;
+			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)&own_module, &m);
+			return m;
+		}();
+		return module;
+	}
+
+	static HMODULE mono_module()
+	{
+		static HMODULE module = GetModuleHandleA("mono-2.0-bdwgc.dll");
+		return module;
+	}
+
+	// The domain pointer can go stale if a domain is reloaded, so guard the lookup with SEH,
+	// like other places that touch memory we don't control
+	static void* jit_info_table_find_safe(void* domain, void* ip)
+	{
+		__try
+		{
+			return mono_functions::jit_info_table_find(domain, ip);
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+		}
+
+		return nullptr;
+	}
+
+	const worker_thread::ip_entry& worker_thread::resolve_ip(void* ip)
+	{
+		auto iter = m_ip_cache.find(ip);
+		if (iter != m_ip_cache.end())
+			return iter->second;
+
+		ip_entry entry;
+
+		// Is this a managed frame? Try the domain captured from the game's threads first,
+		// then the root domain
+		void* domain = m_jit_domain.load(std::memory_order_relaxed);
+		void* jit_info = domain != nullptr ? jit_info_table_find_safe(domain, ip) : nullptr;
+		if (jit_info == nullptr)
+		{
+			void* root_domain = mono_functions::get_root_domain();
+			if (root_domain != nullptr && root_domain != domain)
+				jit_info = jit_info_table_find_safe(root_domain, ip);
+		}
+
+		if (jit_info != nullptr)
+		{
+			MonoMethod* method = mono_functions::jit_info_get_method(jit_info);
+			if (method != nullptr)
+			{
+				const method_entry& resolved = resolve_method(method);
+				entry.text = resolved.text;
+				entry.stopword = resolved.stopword;
+				entry.managed = true;
+				return m_ip_cache.emplace(ip, std::move(entry)).first->second;
+			}
+		}
+
+		// A native frame: report it as module+offset. This also identifies the frames
+		// belonging to the profiler itself and to the Mono runtime (the allocation
+		// machinery), which are skipped from the top of callstacks.
+		HMODULE module = nullptr;
+		if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)ip, &module) && module != nullptr)
+		{
+			char path[MAX_PATH];
+			path[0] = 0;
+			GetModuleFileNameA(module, path, sizeof(path));
+
+			const char* basename = strrchr(path, '\\');
+			basename = basename != nullptr ? basename + 1 : path;
+
+			char line[512];
+			snprintf(line, sizeof(line) - 1, "%s+0x%llX\n", basename, (unsigned long long)((char*)ip - (char*)module));
+			entry.text = line;
+			entry.runtime_internal = module == own_module() || module == mono_module();
+		}
+		else
+		{
+			// Not inside any module and not jit code: probably a trampoline
+			entry.text = "<unknown>\n";
+		}
+
+		return m_ip_cache.emplace(ip, std::move(entry)).first->second;
+	}
+#endif
+
 	worker_thread::callstack_entry worker_thread::intern_callstack(const stack_backtrace& backtrace)
 	{
 		// FNV-1a over the raw pointer values
@@ -142,34 +311,82 @@ namespace owlcat
 		auto& bucket = m_callstack_ids[hash];
 		for (auto& interned : bucket)
 		{
-			if (interned.methods.size() == backtrace.count &&
-				(backtrace.count == 0 || memcmp(interned.methods.data(), backtrace.frames, backtrace.count * sizeof(MonoMethod*)) == 0))
+			if (interned.frames.size() == backtrace.count &&
+				(backtrace.count == 0 || memcmp(interned.frames.data(), backtrace.frames, backtrace.count * sizeof(void*)) == 0))
 				return interned.entry;
 		}
 
-		// First time we see this callstack: resolve method names (cached by pointer)
+		// First time we see this callstack: resolve the frames (cached by pointer)
 		// and build the full text
 		callstack_entry entry{ 0, false };
 
 		std::string backtrace_str;
 		backtrace_str.reserve(4096);
 
-		for (uint32_t i = 0; i < backtrace.count; ++i)
+#if defined(WIN32) && OWLCAT_MONO
+		if (m_capture_raw_ips)
 		{
-			const method_entry& resolved = resolve_method(backtrace.frames[i]);
-			if (resolved.stopword)
+			// Frames are raw instruction pointers: each resolves to either a managed method,
+			// or a native module+offset line, so the resulting callstack is a mix of managed
+			// and native frames. Profiler and Mono frames at the top of the stack (the
+			// allocation machinery itself) are skipped.
+			bool seen_real_frame = false;
+			bool any_managed = false;
+			for (uint32_t i = 0; i < backtrace.count; ++i)
 			{
-				entry.stopword = true;
-				break;
+				const ip_entry& resolved = resolve_ip(backtrace.frames[i]);
+				if (!seen_real_frame && resolved.runtime_internal)
+					continue;
+				seen_real_frame = true;
+
+				if (resolved.stopword)
+				{
+					entry.stopword = true;
+					break;
+				}
+
+				if (resolved.managed)
+					any_managed = true;
+				backtrace_str.append(resolved.text);
 			}
 
-			backtrace_str.append(resolved.text);
+			// If native unwinding can't walk through jit code on this version of Mono,
+			// callstacks will contain no managed frames at all, and the average depth
+			// will be very low. Log statistics periodically, so that this is easy to
+			// diagnose (see also OWLCAT_PROFILER_MONO_WALK).
+			++m_unique_ip_stacks;
+			m_unique_ip_frames += backtrace.count;
+			if (any_managed)
+				++m_unique_ip_stacks_with_managed;
+			if (m_logger != nullptr && (m_unique_ip_stacks % 1024) == 0)
+			{
+				char tmp[256];
+				snprintf(tmp, sizeof(tmp) - 1, "IP capture: %llu of %llu unique callstacks contain managed frames, %.1f frames on average",
+					(unsigned long long)m_unique_ip_stacks_with_managed, (unsigned long long)m_unique_ip_stacks,
+					(double)m_unique_ip_frames / (double)m_unique_ip_stacks);
+				m_logger->log_str(tmp);
+			}
+		}
+		else
+#endif
+		{
+			for (uint32_t i = 0; i < backtrace.count; ++i)
+			{
+				const method_entry& resolved = resolve_method((MonoMethod*)backtrace.frames[i]);
+				if (resolved.stopword)
+				{
+					entry.stopword = true;
+					break;
+				}
+
+				backtrace_str.append(resolved.text);
+			}
 		}
 
 		if (!entry.stopword)
 		{
 			// This mostly means objects allocated directly from native Unity code, like scene objects
-			if (backtrace.count == 0)
+			if (backtrace_str.empty())
 				backtrace_str = "<no stack>";
 
 			entry.id = m_next_callstack_id++;
@@ -178,7 +395,7 @@ namespace owlcat
 			m_events_sink->report_callstack(entry.id, backtrace_str.c_str());
 		}
 
-		bucket.push_back({ std::vector<MonoMethod*>(backtrace.frames, backtrace.frames + backtrace.count), entry });
+		bucket.push_back({ std::vector<void*>(backtrace.frames, backtrace.frames + backtrace.count), entry });
 
 		return entry;
 	}
@@ -333,19 +550,40 @@ namespace owlcat
 
 		// This is a heavy call, but it can only be done here, for obvious reasons.
 		// We ease things up a bit by only collecting addresses here. do_work translates them into strings in another thread.
-#if OWLCAT_MONO
-		mono_functions::stack_walk(
-			[](MonoMethod* method, int32_t native_offset, int32_t il_offset, mono_bool managed, void* data) -> mono_bool
-			{
-				return ((stack_backtrace*)data)->add_trace(method, native_offset, il_offset, managed);
-			}, (void*)&item.backtrace);
-#else
-		mono_functions::stack_walk(
-			[](const Il2CppStackFrameInfo* frame_info, void* data)
-			{
-				((stack_backtrace*)data)->add_trace(frame_info->method, 0, 0, true);
-			}, (void*)&item.backtrace);
+#if defined(WIN32) && OWLCAT_MONO
+		if (m_capture_raw_ips)
+		{
+			// Refresh the domain used for jit info lookups on the worker thread. This thread
+			// is attached to the runtime (we are inside an allocation callback), so
+			// mono_domain_get is valid here, and refreshing it every time keeps the pointer
+			// good across domain reloads.
+			m_jit_domain.store(mono_functions::domain_get(), std::memory_order_relaxed);
+
+			// Capture raw instruction pointers. Unlike mono_stack_walk, this doesn't perform
+			// a jit info table lookup per frame - that's where most of the capture cost is.
+			// The pointers are translated to names on the worker thread, once per unique
+			// callstack (see intern_callstack).
+			item.backtrace.count = capture_stack(item.backtrace.frames, (uint32_t)stack_backtrace::MAX_DEPTH);
+			// If the buffer is full, deeper frames may have been dropped
+			item.backtrace.overflow = item.backtrace.count == stack_backtrace::MAX_DEPTH;
+		}
+		else
 #endif
+		{
+#if OWLCAT_MONO
+			mono_functions::stack_walk(
+				[](MonoMethod* method, int32_t native_offset, int32_t il_offset, mono_bool managed, void* data) -> mono_bool
+				{
+					return ((stack_backtrace*)data)->add_trace(method, native_offset, il_offset, managed);
+				}, (void*)&item.backtrace);
+#else
+			mono_functions::stack_walk(
+				[](const Il2CppStackFrameInfo* frame_info, void* data)
+				{
+					((stack_backtrace*)data)->add_trace(frame_info->method, 0, 0, true);
+				}, (void*)&item.backtrace);
+#endif
+		}
 		// No token: each game thread gets its own implicit producer inside the queue,
 		// so allocating threads don't synchronize with each other at all
 		m_work_items.enqueue(item);
@@ -460,7 +698,11 @@ namespace owlcat
 						//m_stack.push_back(iter);
 					}
 				}
-				++p;
+				// Managed references are always pointer-aligned (objects are allocated aligned,
+				// and reference fields sit at aligned offsets), and we only match exact object
+				// base addresses. Scanning at every byte offset would be 8x slower and could
+				// only produce false positives from values straddling two fields.
+				p += sizeof(intptr_t);
 			}
 		}
 

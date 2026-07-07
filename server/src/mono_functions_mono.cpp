@@ -19,6 +19,10 @@ namespace owlcat
 		mono_func<GetNameType> get_class_namespace("mono_class_get_namespace");
 		mono_func<GetNameType> get_class_name("mono_class_get_name");
 		mono_func<StackWalkType> stack_walk("mono_stack_walk_no_il");
+		mono_func<DomainGetType> domain_get("mono_domain_get");
+		mono_func<DomainGetType> get_root_domain("mono_get_root_domain");
+		mono_func<JitInfoTableFindType> jit_info_table_find("mono_jit_info_table_find");
+		mono_func<JitInfoGetMethodType> jit_info_get_method("mono_jit_info_get_method");
 		mono_func<GetMethodNameType> get_method_name("mono_method_get_name");
 		mono_func<MethodGetClassType> method_get_class("mono_method_get_class");
 		mono_func<ObjectGetClassType> object_get_class("mono_object_get_class");

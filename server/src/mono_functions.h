@@ -66,6 +66,20 @@ namespace owlcat
 		typedef void(CALLING_CONV* StackWalkType)(Il2CppFrameWalkFunc func, void* user_data);
 #endif
 		extern mono_func<StackWalkType> stack_walk;
+
+#if OWLCAT_MONO
+		// Used to translate raw instruction pointers to managed methods when callstacks
+		// are captured natively instead of with mono_stack_walk (see worker_thread).
+		// Optional: if any of these can't be found, the profiler falls back to mono_stack_walk.
+		typedef void* (CALLING_CONV* DomainGetType)();
+		extern mono_func<DomainGetType> domain_get;
+		extern mono_func<DomainGetType> get_root_domain;
+		typedef void* (CALLING_CONV* JitInfoTableFindType)(void* domain, void* addr);
+		extern mono_func<JitInfoTableFindType> jit_info_table_find;
+		typedef MonoMethod* (CALLING_CONV* JitInfoGetMethodType)(void* jit_info);
+		extern mono_func<JitInfoGetMethodType> jit_info_get_method;
+#endif
+
 		typedef const char* (CALLING_CONV* GetMethodNameType)(MonoMethod*);
 		extern mono_func<GetMethodNameType> get_method_name;
 		typedef MonoClass* (CALLING_CONV* MethodGetClassType)(MonoMethod*);
