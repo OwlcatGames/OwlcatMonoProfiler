@@ -737,8 +737,22 @@ void main_window::timerEvent(QTimerEvent* ev)
         m_ui->sizeGraph->replot();
     }
 
-    char tmp[64];
-    sprintf(tmp, "Network buffer: %I64u", m_client.get_network_messages_count());
+    // Measure the database insert rate (events written per second), averaged over ~1 second windows
+    uint64_t db_inserted = m_client.get_db_inserted_events_count();
+    if (!m_db_rate_timer.isValid())
+    {
+        m_db_rate_timer.start();
+        m_last_db_inserted_count = db_inserted;
+    }
+    else if (m_db_rate_timer.elapsed() >= 1000)
+    {
+        m_db_inserts_per_second = (db_inserted - m_last_db_inserted_count) * 1000 / (uint64_t)m_db_rate_timer.elapsed();
+        m_last_db_inserted_count = db_inserted;
+        m_db_rate_timer.restart();
+    }
+
+    char tmp[160];
+    sprintf(tmp, "Network buffer: %I64u | DB inserts/s: %I64u (total: %I64u)", m_client.get_network_messages_count(), m_db_inserts_per_second, db_inserted);
     m_ui->statusbar->showMessage(tmp);
 }
 

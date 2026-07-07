@@ -11,6 +11,7 @@
 #include <thread>
 #include <filesystem>
 #include <cassert>
+#include <atomic>
 #include <unordered_map>
 #include <unordered_set>
 #include <filesystem>
@@ -137,6 +138,10 @@ namespace owlcat
 		// Running total of allocated memory
 		int64_t m_size_running_total = 0;
 
+		// Total number of events written to the database. Atomic: updated on the
+		// processing thread, read from the UI thread to display the insert rate.
+		std::atomic<uint64_t> m_db_inserted_events = 0;
+
 		bool m_has_min_frame = false;
 		// Minimun and maximum known frame
 		uint64_t m_min_frame = 0;
@@ -248,6 +253,9 @@ namespace owlcat
 			}
 			queries::insert_frame_stats(m_db, m_prev_frame, m_frame_allocs, m_frame_frees, m_size_running_total);
 			transaction.commit();
+
+			m_db_inserted_events += m_frame_events.size();
+
 			m_frame_events.clear();
 		}
 
@@ -938,6 +946,8 @@ public:
 		}		
 
 		size_t get_network_messages_count() const { return m_network.get_read_messages_count(); }
+
+		uint64_t get_db_inserted_events_count() const { return m_db_inserted_events; }
 	};
 
 	mono_profiler_client::mono_profiler_client()
@@ -997,9 +1007,14 @@ public:
 		return m_details->is_data_open();
 	}
 
-	size_t mono_profiler_client::get_network_messages_count() const 
+	size_t mono_profiler_client::get_network_messages_count() const
 	{
 		return m_details->get_network_messages_count();
+	}
+
+	uint64_t mono_profiler_client::get_db_inserted_events_count() const
+	{
+		return m_details->get_db_inserted_events_count();
 	}
 
 	mono_profiler_client_data* mono_profiler_client::get_data()

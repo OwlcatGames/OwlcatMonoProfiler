@@ -6,6 +6,7 @@
 #include <qprogressbar.h>
 #include <qboxlayout.h>
 #include <qthread.h>
+#include <qelapsedtimer.h>
 #include "qwt_plot_histogram.h"
 #include "qwt_plot_curve.h"
 #include "qwt_plot_zoneitem.h"
@@ -148,6 +149,11 @@ private:
     int m_pos = 0;
 
     int m_updateTimer = -1;
+
+    // For measuring the database insert rate shown in the status bar
+    QElapsedTimer m_db_rate_timer;
+    uint64_t m_last_db_inserted_count = 0;
+    uint64_t m_db_inserts_per_second = 0;
 
     std::string m_db_file_name;
     bool m_is_db_temporary = false;

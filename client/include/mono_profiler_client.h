@@ -92,6 +92,10 @@ namespace owlcat
 		// Returns the number of messages in network queue
 		size_t get_network_messages_count() const;
 
+		// Returns the total number of profiler events (allocations and frees) written to
+		// the database so far. Monotonic: sample it periodically to measure the insert rate.
+		uint64_t get_db_inserted_events_count() const;
+
 		// Returns an interface for querying profiling data
 		mono_profiler_client_data* get_data();
 
