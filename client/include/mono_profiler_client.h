@@ -96,6 +96,10 @@ namespace owlcat
 		// the database so far. Monotonic: sample it periodically to measure the insert rate.
 		uint64_t get_db_inserted_events_count() const;
 
+		// Returns the path of the event log file of the current capture (empty if no
+		// capture is open). Used by diagnostic tools to access the raw event stream.
+		const char* get_event_log_path() const;
+
 		// Returns an interface for querying profiling data
 		mono_profiler_client_data* get_data();
 

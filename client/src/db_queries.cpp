@@ -5,43 +5,15 @@ namespace owlcat
 {
     namespace queries
     {
-        query_id_t id_insert_alloc_event = "insert_alloc_event";
-        query_id_t id_insert_free_event = "insert_free_event";
         query_id_t id_insert_frame_stats = "insert_frame_stats";
         query_id_t id_select_min_max_frame = "select_min_max_frame";
-        query_id_t id_select_events = "select_events";
-        query_id_t id_select_events_count = "select_events_count";
-        query_id_t id_select_callstack_for_type = "select_callstack_for_type";
+        query_id_t id_select_frame_event_range = "select_frame_event_range";
         query_id_t id_select_stats = "select_stats";
-        query_id_t id_select_live_objects = "select_live_objects";
         query_id_t id_insert_type = "insert_type";
         query_id_t id_insert_callstack = "insert_callstack";
         query_id_t id_select_types = "select_types";
         query_id_t id_select_callstacks = "select_callstacks";
         query_id_t id_select_last_good_size = "select_last_good_size";
-        query_id_t id_select_allocation_type_and_stack = "select_allocation_type_and_stack";
-
-        bool insert_alloc_event(db_t& db, uint64_t frame, uint64_t addr, uint64_t size, uint64_t type_id, uint64_t callstack_id)
-        {
-            return db.query(queries::id_insert_alloc_event,
-                {
-                    {"type_id", type_id},
-                    {"address", addr},
-                    {"size", size},
-                    {"frame", frame},
-                    {"callstack_id", callstack_id},
-                });
-        }
-
-        bool insert_free_event(db_t& db, uint64_t frame, uint64_t addr, uint32_t size)
-        {
-            return db.query(queries::id_insert_free_event,
-                {
-                    {"address", addr},
-                    {"frame", frame},
-                    {"size", size},
-                });
-        }
 
         bool insert_type(db_t& db, const std::string& type, uint64_t id)
         {
@@ -61,7 +33,7 @@ namespace owlcat
                 });
         }
 
-        bool insert_frame_stats(db_t& db, uint64_t frame, uint64_t allocs, uint64_t frees, int64_t size)
+        bool insert_frame_stats(db_t& db, uint64_t frame, uint64_t allocs, uint64_t frees, int64_t size, uint64_t first_event_offset, uint64_t end_event_offset)
         {
             return db.query(queries::id_insert_frame_stats,
                 {
@@ -69,6 +41,8 @@ namespace owlcat
                     {"allocs", allocs},
                     {"frees", frees},
                     {"size", size},
+                    {"first_offset", first_event_offset},
+                    {"end_offset", end_event_offset},
                 });
         }
 
@@ -77,23 +51,9 @@ namespace owlcat
             return db.query_data(queries::id_select_min_max_frame, {});
         }
 
-        cursor_t select_events(db_t& db, uint64_t from_frame, uint64_t to_frame)
+        cursor_t select_frame_event_range(db_t& db, uint64_t from_frame, uint64_t to_frame)
         {
-            return db.query_data(queries::id_select_events, { {"from", from_frame}, {"to", to_frame} });
-        }
-
-        size_t select_events_count(db_t& db, uint64_t from_frame, uint64_t to_frame)
-        {
-            auto cursor = db.query_data(queries::id_select_events_count, { {"from", from_frame}, {"to", to_frame} });
-            if (!cursor.next())
-                return 0;
-
-            return cursor.get_int64("count");
-        }
-
-        cursor_t select_callstack_for_type(db_t& db, uint64_t from_frame, uint64_t to_frame, uint64_t type)
-        {
-            return db.query_data(queries::id_select_callstack_for_type, { {"from", from_frame}, {"to", to_frame}, {"type", type} });
+            return db.query_data(queries::id_select_frame_event_range, { {"from", from_frame}, {"to", to_frame} });
         }
 
         cursor_t select_stats(db_t& db, uint64_t from_frame, uint64_t to_frame)
@@ -114,11 +74,6 @@ namespace owlcat
         cursor_t select_last_good_size(db_t& db, uint64_t from_frame)
         {
             return db.query_data(queries::id_select_last_good_size, { {"from", from_frame} });
-        }
-
-        cursor_t select_allocation_type_and_stack(db_t& db, uint64_t address)
-        {
-            return db.query_data(queries::id_select_allocation_type_and_stack, { {"address", address} });
         }
 
         bool register_queries(persistent_storage::persistent_storage& db)
@@ -155,44 +110,19 @@ namespace owlcat
                 "FROM FrameStats "
                 "WHERE frame <= $from ORDER BY frame DESC LIMIT 1"
             );
-            register_query(queries::id_select_allocation_type_and_stack,
-                "SELECT type_id, callstack_id "
-                "FROM ProfilerEvents "
-                "WHERE event_type_id=1 AND address=$address ORDER BY frame DESC LIMIT 1"
-            );
-
-            register_query(queries::id_insert_alloc_event,
-                "INSERT INTO ProfilerEvents (event_type_id, type_id, address, size, frame, callstack_id)"
-                "VALUES (1, $type_id, $address, $size, $frame, $callstack_id)"
-            );
-            register_query(queries::id_insert_free_event,
-                "INSERT INTO ProfilerEvents (event_type_id, address, frame, size)"
-                "VALUES (2, $address, $frame, $size)"
-            );
             register_query(queries::id_insert_frame_stats,
-                "INSERT OR REPLACE INTO FrameStats (frame, allocs, frees, size)"
-                "VALUES ($frame, $allocs, $frees, $size)"
-            );            
+                "INSERT OR REPLACE INTO FrameStats (frame, allocs, frees, size, first_event_offset, end_event_offset)"
+                "VALUES ($frame, $allocs, $frees, $size, $first_offset, $end_offset)"
+            );
             register_query(queries::id_select_min_max_frame,
-                "SELECT MIN(frame) as min_frame, MAX(frame) AS max_frame FROM ProfilerEvents"
+                "SELECT MIN(frame) as min_frame, MAX(frame) AS max_frame FROM FrameStats"
             );
-            register_query(queries::id_select_events,
-                "SELECT event_type_id, event_id, type_id, address, size, frame, callstack_id "
-                "FROM ProfilerEvents "
-                "WHERE frame >= $from AND frame <= $to "
-                "ORDER BY frame ASC"
-            );
-            register_query(queries::id_select_events_count,
-                "SELECT COUNT(*) AS count "
-                "FROM ProfilerEvents "
-                "WHERE frame >= $from AND frame <= $to "
-            );
-            register_query(queries::id_select_callstack_for_type,
-                "SELECT event_id, ProfilerEvents.type_id, ObjectTypes.name, address, size, frame, ProfilerEvents.callstack_id, callstack "
-                "FROM ProfilerEvents "
-                "LEFT JOIN ObjectTypes ON ObjectTypes.type_id=ProfilerEvents.type_id "
-                "LEFT JOIN Callstacks ON Callstacks.callstack_id=ProfilerEvents.callstack_id "
-                "WHERE frame >= $from AND frame <= $to AND ProfilerEvents.type_id = $type"
+            // Offsets grow monotonically with frames, so the range of a set of frames
+            // is (min of first offsets, max of end offsets)
+            register_query(queries::id_select_frame_event_range,
+                "SELECT MIN(first_event_offset) AS begin_offset, MAX(end_event_offset) AS end_offset "
+                "FROM FrameStats "
+                "WHERE frame >= $from AND frame <= $to"
             );
             register_query(queries::id_select_stats,
                 "SELECT frame, allocs, frees, size "
@@ -200,17 +130,6 @@ namespace owlcat
                 "WHERE frame >= $from AND frame <= $to "
                 "ORDER BY frame"
             );
-            //register_query(queries::id_select_live_objects,
-            //    //"WITH last_event_per_address AS(SELECT address, MAX(event_id) OVER(PARTITION BY address) AS event_id FROM ProfilerEvents) "
-            //    //"SELECT * FROM last_event_per_address LEFT JOIN ProfilerEvents WHERE ProfilerEvents.event_id = last_event_per_address.event_id AND event_type_id = 1 "
-            //    "WITH last_event_per_address AS(SELECT address, MAX(event_id) OVER(PARTITION BY address) AS event_id FROM ProfilerEvents) "
-            //    "SELECT ProfilerEvents.event_id, ProfilerEvents.type_id, ObjectTypes.name, ProfilerEvents.address, size, frame, ProfilerEvents.callstack_id, callstack "
-            //    "FROM last_event_per_address "
-            //    "LEFT JOIN ProfilerEvents "
-            //    "LEFT JOIN ObjectTypes ON ObjectTypes.type_id=ProfilerEvents.type_id "
-            //    "LEFT JOIN Callstacks ON Callstacks.callstack_id=ProfilerEvents.callstack_id "
-            //    "WHERE ProfilerEvents.event_id = last_event_per_address.event_id AND event_type_id = 1 "
-            //);
 
             return all_ok;
         }

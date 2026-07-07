@@ -5,6 +5,8 @@
 #include "persistent_storage.h"
 #include "db_migrations.h"
 #include "db_queries.h"
+#include "event_log.h"
+#include "capture_container.h"
 
 #include <memory>
 #include <string>
@@ -12,6 +14,7 @@
 #include <filesystem>
 #include <cassert>
 #include <atomic>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <filesystem>
@@ -138,9 +141,35 @@ namespace owlcat
 		// Running total of allocated memory
 		int64_t m_size_running_total = 0;
 
-		// Total number of events written to the database. Atomic: updated on the
-		// processing thread, read from the UI thread to display the insert rate.
+		// Total number of events stored (written to the event log). Atomic: updated on
+		// the processing thread, read from the UI thread to display the storage rate.
 		std::atomic<uint64_t> m_db_inserted_events = 0;
+
+		// The event log of the current capture: events live here, not in the database
+		// (see event_log.h)
+		event_log_writer m_event_log;
+		std::string m_event_log_file_name;
+		// Byte offset in the event log where the current frame's events begin
+		uint64_t m_current_frame_begin = 0;
+
+		// Files extracted from an opened capture container into a temporary directory,
+		// and the directory itself; cleaned up when the capture is closed
+		std::vector<std::string> m_extracted_files;
+		std::string m_extract_dir;
+
+		void cleanup_extracted_files()
+		{
+			std::error_code ec;
+			for (auto& file : m_extracted_files)
+				std::filesystem::remove(file, ec);
+			m_extracted_files.clear();
+
+			if (!m_extract_dir.empty())
+			{
+				std::filesystem::remove(m_extract_dir, ec);
+				m_extract_dir.clear();
+			}
+		}
 
 		bool m_has_min_frame = false;
 		// Minimun and maximum known frame
@@ -230,7 +259,8 @@ namespace owlcat
 			return callstack_id;
 		}
 
-		// Saves events from the current frame into database using a transaction for maximum performance
+		// Saves events from the current frame: the events themselves go to the event
+		// log file, the frame's stats and its byte range in the log go to the database
 		void save_frame_events()
 		{
 			// There should be no events before we receice the first frame
@@ -243,16 +273,14 @@ namespace owlcat
 				return;
 			}
 
-			persistent_storage::transaction transaction(m_db, persistent_storage::transaction_behaviour::rollback);
 			for (auto& e : m_frame_events)
-			{
-				if (e.type == profiler_event::alloc)
-					queries::insert_alloc_event(m_db, e.frame, e.addr, e.size, e.type_id, e.callstack_id);
-				else
-					queries::insert_free_event(m_db, e.frame, e.addr, e.size);
-			}
-			queries::insert_frame_stats(m_db, m_prev_frame, m_frame_allocs, m_frame_frees, m_size_running_total);
-			transaction.commit();
+				m_event_log.append(e.frame, e.addr, e.type_id, e.callstack_id, e.size, e.type == profiler_event::alloc);
+
+			// The events must hit the file before the frame's byte range is published
+			// to the database, or a concurrent reader could read past the valid data
+			m_event_log.flush();
+
+			queries::insert_frame_stats(m_db, m_prev_frame, m_frame_allocs, m_frame_frees, m_size_running_total, m_current_frame_begin, m_event_log.position());
 
 			m_db_inserted_events += m_frame_events.size();
 
@@ -274,6 +302,7 @@ namespace owlcat
 
 				save_frame_events();
 				m_prev_frame = frame;
+				m_current_frame_begin = m_event_log.position();
 
 				m_frame_allocs = 0;
 				m_frame_frees = 0;
@@ -514,13 +543,14 @@ namespace owlcat
 				}
 
 				// Avoid storing too many events in queue
-				if (m_frame_events.size() > 10000)
+				if (m_frame_events.size() > 100000)
 					save_frame_events();
 			}
 
-			// Submit last events before quitting
-			if (!m_frame_events.empty())
-				try_save_events(m_frame_events[0].frame);
+			// Submit last events before quitting. save_frame_events is called directly:
+			// all buffered events belong to the current frame, so try_save_events would
+			// consider them already saved and drop them.
+			save_frame_events();
 		}
 
 	public:
@@ -532,8 +562,9 @@ namespace owlcat
 		~details()
 		{
 			stop();
-			
+
 			m_db.close();
+			cleanup_extracted_files();
 		}
 
 #if defined(WIN32)
@@ -639,6 +670,10 @@ namespace owlcat
 			m_min_frame = 0;
 			m_max_frame = 0;
 			m_stop = false;
+			m_db_inserted_events = 0;
+
+			m_event_log.close();
+			cleanup_extracted_files();
 
 			m_db_file_name = db_file_name;
 
@@ -648,9 +683,13 @@ namespace owlcat
 			if (!m_db.open(m_db_file_name, true))
 				return false;
 
+			m_db.pragma("PRAGMA locking_mode = EXCLUSIVE");
+			m_db.pragma("PRAGMA foreign_keys = OFF");
+			m_db.pragma("PRAGMA recursive_triggers = OFF");
 			// WAL performance is not good enough
-			//m_db.pragma("PRAGMA journal_mode=wal");
-			m_db.pragma("PRAGMA journal_mode=memory");
+			//m_db.pragma("PRAGMA journal_mode=wal");			
+			//m_db.pragma("PRAGMA journal_mode=memory");
+			m_db.pragma("PRAGMA journal_mode=OFF");
 			// More performance at a cost of less reliability
 			m_db.pragma("PRAGMA synchronous=OFF");
 			// Set a BIG memory cache: we want to keep a lot in memory
@@ -668,6 +707,15 @@ namespace owlcat
 			if (!queries::register_queries(m_db))
 				return false;
 
+			// The events themselves are stored in the event log file next to the
+			// database (see event_log.h)
+			m_event_log_file_name = m_db_file_name + ".events";
+			if (std::filesystem::exists(m_event_log_file_name))
+				std::filesystem::remove(m_event_log_file_name);
+			if (!m_event_log.create(m_event_log_file_name))
+				return false;
+			m_current_frame_begin = m_event_log.position();
+
 			m_thread = std::thread(&mono_profiler_client::details::process_messages, this);
 
 			return true;
@@ -678,24 +726,44 @@ namespace owlcat
 			m_stop = true;
 			if (m_thread.joinable())
 				m_thread.join();
-			m_network.stop();			
+			m_network.stop();
+
+			// No more events will be written. The log file stays on disk: readers
+			// open it by name for analysis queries.
+			m_event_log.close();
 		}
 
 		void close_db()
 		{
 			assert(!m_thread.joinable() && (!is_connected() || is_connecting()));
+			m_event_log.close();
 			m_db.close();
+			cleanup_extracted_files();
 		}
 
 		bool save_db(const std::string& new_db_file_name, bool move)
 		{
-			// Save in-memory or temporary database to file
-			if (!m_db.save(new_db_file_name))
+			// Saving is only possible when the capture is stopped
+			if (m_thread.joinable())
 				return false;
 
-			// Reopen saved database
-			m_db_file_name = new_db_file_name;
-			return open_data(m_db_file_name.c_str());
+			// The working files stay in place and open: saving packs a snapshot of them
+			// into a single container file. The database is snapshotted through the
+			// backup API first, because the live connection can hold dirty pages that
+			// are not in the file yet.
+			const std::string db_snapshot = new_db_file_name + ".dbtmp";
+			if (!m_db.save(db_snapshot))
+				return false;
+
+			std::map<std::string, std::string> files;
+			files[capture_container::entry_database] = db_snapshot;
+			files[capture_container::entry_events] = m_event_log_file_name;
+			bool ok = capture_container::pack(new_db_file_name, files);
+
+			std::error_code ec;
+			std::filesystem::remove(db_snapshot, ec);
+
+			return ok;
 		}
 
 		bool open_data(const std::string& file)
@@ -703,8 +771,10 @@ namespace owlcat
 			if (m_thread.joinable())
 				return false;
 
+			m_event_log.close();
 			if (m_db.is_open())
 				m_db.close();
+			cleanup_extracted_files();
 
 			// Don't mix ids from a previously opened database or session
 			m_type_to_id_map.clear();
@@ -712,7 +782,34 @@ namespace owlcat
 			m_callstacks_to_id_map.clear();
 			m_id_to_callstacks_map.clear();
 
-			return m_db.open(file, false) && upgrade_database(m_db) && queries::register_queries(m_db) && load_types_and_callstacks();
+			// Unpack the container into a temporary directory: SQLite needs a plain
+			// file, and the event log is addressed by byte offsets
+			std::error_code ec;
+			auto temp_root = std::filesystem::temp_directory_path(ec) / "OwlcatMonoProfiler";
+			char unique_name[64];
+			sprintf(unique_name, "capture_%llu", (unsigned long long)std::chrono::steady_clock::now().time_since_epoch().count());
+			auto extract_dir = temp_root / unique_name;
+			std::filesystem::create_directories(extract_dir, ec);
+			if (ec)
+				return false;
+
+			std::map<std::string, std::string> extracted;
+			if (!capture_container::unpack(file, extract_dir.string(), extracted))
+				return false;
+
+			auto db_entry = extracted.find(capture_container::entry_database);
+			auto events_entry = extracted.find(capture_container::entry_events);
+			if (db_entry == extracted.end() || events_entry == extracted.end())
+				return false;
+
+			m_extract_dir = extract_dir.string();
+			for (auto& entry : extracted)
+				m_extracted_files.push_back(entry.second);
+
+			m_db_file_name = db_entry->second;
+			m_event_log_file_name = events_entry->second;
+
+			return m_db.open(m_db_file_name, false) && upgrade_database(m_db) && queries::register_queries(m_db) && load_types_and_callstacks();
 		}
 
 		bool is_connected() const
@@ -798,12 +895,23 @@ namespace owlcat
 
 		bool get_allocation_type_and_stack(uint64_t address, uint64_t& type_id, uint64_t& stack_id)
 		{
-			auto result_cursor = queries::select_allocation_type_and_stack(m_db, address);
-			if (result_cursor.has_error() || !result_cursor.next())
+			// Only the byte range published to the database is guaranteed to be readable
+			auto range_cursor = queries::select_frame_event_range(m_db, 0, (uint64_t)INT64_MAX);
+			if (range_cursor.has_error() || !range_cursor.next())
 				return false;
 
-			type_id = result_cursor.get_uint64("type_id");
-			stack_id = result_cursor.get_uint64("callstack_id");
+			uint64_t end_offset = range_cursor.get_uint64("end_offset");
+
+			auto reader = event_log_reader::open(m_event_log_file_name);
+			if (reader == nullptr)
+				return false;
+
+			event_view found;
+			if (!reader->find_last_allocation(address, end_offset, found))
+				return false;
+
+			type_id = found.type_id;
+			stack_id = found.callstack_id;
 
 			return true;
 		}
@@ -906,48 +1014,54 @@ public:
 			std::unordered_map<uint64_t, live_object> live_objects_map;
 			live_objects_map.reserve(1024 * 1024);
 
-			size_t events_count = queries::select_events_count(m_db, from_frame, to_frame);
+			// Find the byte range of the requested frames in the event log
+			auto range_cursor = queries::select_frame_event_range(m_db, from_frame, to_frame);
+			if (range_cursor.has_error() || !range_cursor.next())
+				return;
 
-			size_t row_num = 0;
+			uint64_t begin_offset = range_cursor.get_uint64("begin_offset");
+			uint64_t end_offset = range_cursor.get_uint64("end_offset");
 
-			auto result = queries::select_events(m_db, from_frame, to_frame);
-			while(result.next())
+			auto reader = event_log_reader::open(m_event_log_file_name);
+			if (reader == nullptr)
+				return;
+
+			uint64_t events_count = reader->count_events(begin_offset, end_offset);
+			uint64_t row_num = 0;
+			bool cancelled = false;
+
+			reader->read_range(begin_offset, end_offset, [&](const event_view& e)
 			{
-				uint64_t event_type = result.get_uint64("event_type_id");
-				uint64_t addr = result.get_uint64("address");
-
-				// Allocation: write object to map
-				if (event_type == 1)
-				{
-					uint64_t frame = result.get_uint64("frame");
-					uint64_t size = result.get_uint64("size");
-					uint64_t type = result.get_uint64("type_id");
-					uint64_t callstack = result.get_uint64("callstack_id");
-					live_objects_map.emplace(addr, live_object(addr, size, frame, type, callstack));
-				}
-				// Deallocation: remove object from map
+				// Allocation: write object to map. Deallocation: remove object from map.
+				if (e.is_alloc)
+					live_objects_map.emplace(e.addr, live_object(e.addr, e.size, e.frame, e.type_id, e.callstack_id));
 				else
+					live_objects_map.erase(e.addr);
+
+				if (progress_func != nullptr && !progress_func((size_t)row_num++, (size_t)events_count))
 				{
-					auto iter = live_objects_map.find(addr);
-					if (iter != live_objects_map.end())
-						live_objects_map.erase(iter);
+					cancelled = true;
+					return false;
 				}
 
-				if (progress_func != nullptr)
-					if (!progress_func(row_num++, events_count))
-						return;
-			}
+				return true;
+			});
+
+			if (cancelled)
+				return;
 
 			// Flatten the map
 			for (auto& pair : live_objects_map)
 			{
 				objects.push_back(pair.second);
 			}
-		}		
+		}
 
 		size_t get_network_messages_count() const { return m_network.get_read_messages_count(); }
 
 		uint64_t get_db_inserted_events_count() const { return m_db_inserted_events; }
+
+		const char* get_event_log_path() const { return m_event_log_file_name.c_str(); }
 	};
 
 	mono_profiler_client::mono_profiler_client()
@@ -1015,6 +1129,11 @@ public:
 	uint64_t mono_profiler_client::get_db_inserted_events_count() const
 	{
 		return m_details->get_db_inserted_events_count();
+	}
+
+	const char* mono_profiler_client::get_event_log_path() const
+	{
+		return m_details->get_event_log_path();
 	}
 
 	mono_profiler_client_data* mono_profiler_client::get_data()

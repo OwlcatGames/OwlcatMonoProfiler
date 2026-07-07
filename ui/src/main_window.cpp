@@ -159,8 +159,8 @@ main_window::main_window(QWidget* parent) :
 
     // --------- Pickers ---------
 
-    m_allocations_picker = std::make_shared<band_picker>(m_ui->allocationsGraph->canvas());
-    m_size_picker = std::make_shared<band_picker>(m_ui->sizeGraph->canvas());
+    m_allocations_picker = std::make_shared<band_picker>(m_ui->allocationsGraph->canvas(), band_picker::y_format::count);
+    m_size_picker = std::make_shared<band_picker>(m_ui->sizeGraph->canvas(), band_picker::y_format::bytes);
 
     m_allocations_picker->setStateMachine(new QwtPickerDragRectMachine());
     m_allocations_picker->setTrackerMode(QwtPicker::AlwaysOn);
@@ -175,6 +175,37 @@ main_window::main_window(QWidget* parent) :
     m_sizeZone.attach(m_ui->sizeGraph);
     m_sizeZone.setOrientation(Qt::Vertical);
     m_sizeZone.setZ(100);
+
+    // Show the graphs' actual values at the cursor's frame in the trackers.
+    // The frame is clamped to the loaded data, so hovering past the end of the
+    // capture shows the last frame's values.
+    m_allocations_picker->set_value_text([this](qint64 frame) -> QString
+    {
+        if (!m_data || m_data->get_allocations_count_size() == 0)
+            return QString();
+
+        const qint64 first = m_data->first_visible_frame;
+        const qint64 last = first + (qint64)m_data->get_allocations_count_size() - 1;
+        frame = qBound(first, frame, last);
+        const uint64_t index = frame - first;
+
+        const qint64 allocs = (qint64)m_data->get_allocations_count(index).value;
+        const qint64 frees = index < m_data->get_frees_count_size() ? (qint64)m_data->get_frees_count(index).value : 0;
+        return QString("frame %1: %2 allocs, %3 frees").arg(frame).arg(allocs).arg(frees);
+    });
+
+    m_size_picker->set_value_text([this](qint64 frame) -> QString
+    {
+        if (!m_data || m_data->get_sizes_size() == 0)
+            return QString();
+
+        const qint64 first = m_data->first_visible_frame;
+        const qint64 last = first + (qint64)m_data->get_sizes_size() - 1;
+        frame = qBound(first, frame, last);
+        const uint64_t index = frame - first;
+
+        return QString("frame %1: %2").arg(frame).arg(size_to_string(m_data->get_size(index).y()));
+    });
 
     connect(m_allocations_picker.get(), SIGNAL(selected(const QPolygon)), this, SLOT(onPickerChanged(const QPolygon)));
     connect(m_size_picker.get(), SIGNAL(selected(const QPolygon)), this, SLOT(onPickerChanged(const QPolygon)));
@@ -578,22 +609,42 @@ void main_window::onSearchTypeSelected(const QItemSelection& selected, const QIt
 }
 
 void main_window::onPickerChanged(const QPolygon& selection)
-{    
+{
     QRect rect(selection.first(), selection.last());
     rect = rect.normalized();
-    auto x1 = floor(m_ui->allocationsGraph->invTransform(QwtPlot::xBottom, rect.left()));
-    auto x2 = ceil(m_ui->allocationsGraph->invTransform(QwtPlot::xBottom, rect.right()));
+
+    const double left = m_ui->allocationsGraph->invTransform(QwtPlot::xBottom, rect.left());
+    const double right = m_ui->allocationsGraph->invTransform(QwtPlot::xBottom, rect.right());
+
+    // Frame f occupies [f, f+1) on the X axis. The selection is computed as an
+    // INCLUSIVE frame range [first_frame, last_frame] - every frame whose column
+    // the drag overlaps - and everything downstream takes inclusive ranges. The
+    // only exclusive value is the highlight zone end, which is in axis coordinates.
+    int first_frame = (int)floor(left);
+    int last_frame = (int)ceil(right) - 1;
+
+    // A drag that reaches the right edge of the canvas means "up to the end of
+    // what is visible": include the boundary frame, whose data point can sit
+    // exactly on the edge of the axis
+    if (rect.right() >= m_ui->allocationsGraph->canvas()->width() - 2)
+        last_frame = (int)floor(right);
+
+    // A click exactly on a frame boundary still selects one frame
+    if (last_frame < first_frame)
+        last_frame = first_frame;
 
     if (m_ui->snapToGC->checkState() == Qt::Checked)
     {
-        x1 = m_data->get_closest_gc_frame(x1);
-        x2 = m_data->get_closest_gc_frame(x2) + 1;
+        first_frame = (int)m_data->get_closest_gc_frame(first_frame);
+        last_frame = (int)m_data->get_closest_gc_frame(last_frame);
+        if (last_frame < first_frame)
+            last_frame = first_frame;
     }
 
-    m_allocationsZone.setInterval(x1, x2);    
-    m_sizeZone.setInterval(x1, x2);
+    m_allocationsZone.setInterval(first_frame, last_frame + 1);
+    m_sizeZone.setInterval(first_frame, last_frame + 1);
 
-    calculateLiveObjects(x1, x2-1);
+    calculateLiveObjects(first_frame, last_frame);
 }
 
 void main_window::onLiveObjectsCallstacksContextMenuRequested(QPoint point)
@@ -752,7 +803,7 @@ void main_window::timerEvent(QTimerEvent* ev)
     }
 
     char tmp[160];
-    sprintf(tmp, "Network buffer: %I64u | DB inserts/s: %I64u (total: %I64u)", m_client.get_network_messages_count(), m_db_inserts_per_second, db_inserted);
+    sprintf(tmp, "Network buffer: %I64u | Events stored/s: %I64u (total: %I64u)", m_client.get_network_messages_count(), m_db_inserts_per_second, db_inserted);
     m_ui->statusbar->showMessage(tmp);
 }
 

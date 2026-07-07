@@ -46,6 +46,7 @@ add_subdirectory( ui )
 if (WIN32)
     add_subdirectory( test )
 endif()
+add_subdirectory( capture_check )
 
 # ---------------- Packaging ----------------
 

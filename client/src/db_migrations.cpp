@@ -28,26 +28,20 @@ namespace owlcat
     static std::vector<migration_t> all_migrations =
     {
         //----------------------------------------------------------------
+        // Note: the events themselves are not stored in the database - they live in the
+        // event log file (see event_log.h). The database stores the reference tables,
+        // and, per frame, the byte range of the frame's events in the log.
         {
             "Create basic tables",
             {
-                {
-                    "CREATE TABLE ProfilerEvents("
-                    "event_id INTEGER PRIMARY KEY NOT NULL,"
-                    "event_type_id INT NOT NULL,"
-                    "type_id INT,"
-                    "address INT NOT NULL,"
-                    "size INT,"
-                    "frame INT NOT NULL,"
-                    "callstack_id INT"
-                    ")"
-                },
                 {
                     "CREATE TABLE FrameStats("
                     "frame INTEGER PRIMARY KEY NOT NULL,"
                     "allocs INT NOT NULL,"
                     "frees INT NOT NULL,"
-                    "size INT NOT NULL"
+                    "size INT NOT NULL,"
+                    "first_event_offset INT NOT NULL,"
+                    "end_event_offset INT NOT NULL"
                     ")"
                 },
                 {
@@ -62,26 +56,8 @@ namespace owlcat
                     "callstack TEXT NOT NULL UNIQUE"
                     ")"
                 },
-                {
-                    "CREATE INDEX frame_index ON ProfilerEvents("
-                    "    frame ASC"
-                    ");"
-                },
             }
         },
-        ////----------------------------------------------------------------
-        //// This speeds up Go To Callstack significantly, but slows down
-        //// insertation too much. Investigate a better way
-        //{
-        //    "Create index on addresses",
-        //    {
-        //        {
-        //            "CREATE INDEX address_index ON ProfilerEvents("
-        //            "    address ASC"
-        //            ");"
-        //        },
-        //    }
-        //},
     };
 
     // Important: queries are not registred before this call, so we can't use named queries here, unless we register them ourselves

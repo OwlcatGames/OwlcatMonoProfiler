@@ -35,5 +35,18 @@ int main()
     server.stop();
     client.stop();
 
+    // Check that packing a capture into a container and re-opening it works
+    if (!client.save_db("test_saved.owl", false))
+    {
+        printf("save_db failed\n");
+        return 1;
+    }
+
+    if (!client.open_data("test_saved.owl"))
+    {
+        printf("open_data failed\n");
+        return 1;
+    }
+
     return 0;
 }

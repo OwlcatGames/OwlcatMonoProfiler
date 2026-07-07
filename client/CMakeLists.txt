@@ -9,13 +9,17 @@ project( owlcat_mono_profiler_client CXX )
 set( SOURCES_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/src )
 set( INCLUDES_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/include )
 
-set( ALL_SOURCES         
+set( ALL_SOURCES
     ${INCLUDES_ROOT}/mono_profiler_client.h
     ${SOURCES_ROOT}/mono_profiler_client.cpp
     ${SOURCES_ROOT}/db_queries.h
     ${SOURCES_ROOT}/db_queries.cpp
     ${SOURCES_ROOT}/db_migrations.h
     ${SOURCES_ROOT}/db_migrations.cpp
+    ${SOURCES_ROOT}/event_log.h
+    ${SOURCES_ROOT}/event_log.cpp
+    ${SOURCES_ROOT}/capture_container.h
+    ${SOURCES_ROOT}/capture_container.cpp
 )
 
 # ---------------- Targets ----------------
