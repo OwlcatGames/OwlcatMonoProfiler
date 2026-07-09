@@ -11,6 +11,9 @@ namespace Owlcat
         public static extern void StartProfiling();
 
         [DllImport("mono_profiler_mono")]
+        public static extern void StopProfiling();
+
+        [DllImport("mono_profiler_mono")]
         public static extern void EndProfilingFrame();
 #endif
 

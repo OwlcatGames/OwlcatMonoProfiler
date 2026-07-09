@@ -848,7 +848,7 @@ void main_window::calculateLiveObjects(int from_frame, int to_frame)
         [this, from_frame, to_frame]()
         {
             bool first_time = true;
-            size_t cnt = 0;
+            size_t last_percent = 0;
 
             m_live_objects_data.update(from_frame, to_frame, [&](size_t cur, size_t max)
                 {
@@ -860,9 +860,10 @@ void main_window::calculateLiveObjects(int from_frame, int to_frame)
                         first_time = false;
                         emit onLiveObjectTypesProgressInitiated(0, (int)max);
                     }
-                    if (cur / 10 > cnt)
+                    size_t percent = max > 0 ? cur * 100 / max : 0;
+                    if (percent > last_percent)
                     {
-                        cnt = cur / 10;
+                        last_percent = percent;
                         emit onLiveObjectTypesProgressChanged((int)cur);
                     }
 

@@ -216,6 +216,13 @@ extern "C"
             server->start(true, 8888);
     }
 
+    __declspec(dllexport) void StopProfiling()
+    {
+        // Avoid second call to start if already started from detour, even if the game wants it
+        if (!g_is_detoured && !g_is_detoured_by_another_dll)
+            server->stop();
+    }
+
     __declspec(dllexport) void EndProfilingFrame()
     {
         if (!g_is_detoured && !g_is_detoured_by_another_dll)
