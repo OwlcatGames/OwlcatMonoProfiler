@@ -5,8 +5,25 @@
 #include "detours.h"
 #include "network.h"
 #include <string>
+#include <cstdlib>
 
 using namespace owlcat;
+
+// The port to listen on. The client passes it via the OWLCAT_PROFILER_PORT environment
+// variable (the injected child inherits the client's environment); this is the one setting
+// that must be known before the client connects. Everything else about the capture (managed
+// vs native, native-hook config) arrives over the connection as CMD_CONFIGURE, so it also
+// works for the manually-instrumented / Editor case where env vars can't reach the DLL.
+static int read_port()
+{
+	if (const char* env_port = getenv("OWLCAT_PROFILER_PORT"))
+	{
+		int p = atoi(env_port);
+		if (p > 0)
+			return p;
+	}
+	return 8888;
+}
 
 // A global pointer to an instance of profiler server
 mono_profiler_server* server = nullptr;
@@ -89,8 +106,8 @@ bool __cdecl player_init_engine_graphics_detour(bool arg)
     CloseHandle(pipe);
     pipe = INVALID_HANDLE_VALUE;
 
-    // Start server. We really should pass the port here, somehow
-    server->start(true, 8888);    
+    // Listen for the client; it configures and starts the profiler over the connection
+    server->start(true, read_port());
 
     // Return control to the original function
     return g_original_player_init_engine_graphics(arg);
@@ -213,7 +230,7 @@ extern "C"
     {
         // Avoid second call to start if already started from detour, even if the game wants it
         if (!g_is_detoured && !g_is_detoured_by_another_dll)
-            server->start(true, 8888);
+            server->start(true, read_port());
     }
 
     __declspec(dllexport) void StopProfiling()

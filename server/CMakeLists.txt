@@ -20,6 +20,8 @@ set( ALL_SOURCES
     ${SOURCES_ROOT}/load_library.cpp
     ${SOURCES_ROOT}/worker_thread.h
     ${SOURCES_ROOT}/worker_thread.cpp
+    ${SOURCES_ROOT}/native_hooks.h
+    ${SOURCES_ROOT}/native_hooks.cpp
 )
 
 if (WIN32)

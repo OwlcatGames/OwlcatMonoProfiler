@@ -23,6 +23,9 @@ class run_dialog : public QDialog
         QString args;
         QString port;
         QString mode;
+        bool track_managed;
+        bool track_native;
+        QString hook_config;
         time_t time;
     };
     std::vector<prev_run_settings> m_prev_run_settings;
@@ -31,6 +34,7 @@ class run_dialog : public QDialog
     Q_OBJECT
 public slots:
     void browseForApp();
+    void browseForHookConfig();
     void accept();
     void onPathSelected(QString path);
 
@@ -41,6 +45,12 @@ public:
     std::string arguments();
     int port();
     ProfileMode mode();
+    // True if managed (Mono/IL2CPP) heap tracking is enabled
+    bool trackManaged();
+    // True if native heap tracking is enabled
+    bool trackNative();
+    // Path to the native-hook config file (empty if native tracking is off)
+    std::string hookConfigPath();
 
 private:
     void trim_prev_settings();

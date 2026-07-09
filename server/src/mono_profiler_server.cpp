@@ -6,6 +6,10 @@
 
 #include <memory>
 #include <thread>
+#include <atomic>
+#include <mutex>
+#include <chrono>
+#include <string>
 #include <unordered_map>
 
 #include <memory_writer.h>
@@ -211,11 +215,26 @@ namespace owlcat
 		std::thread m_commands_thread;
 		bool m_stop_commands_thread = false;
 
+		// The profiler is started once, when the client sends CMD_CONFIGURE. This guards
+		// that (against the timeout fallback in start() racing the commands thread).
+		std::mutex m_start_mutex;
+		std::atomic<bool> m_profiler_started{ false };
+
 	public:
 		details()
 			: m_sink(m_network)
 			, m_profiler(&m_sink)
 		{
+		}
+
+		// Starts the profiler exactly once, with the given capture configuration
+		void configure(uint32_t capture_flags, const std::string& native_config)
+		{
+			std::scoped_lock lock(m_start_mutex);
+			if (m_profiler_started)
+				return;
+			m_profiler.start(capture_flags, native_config);
+			m_profiler_started = true;
 		}
 
 		~details()
@@ -279,11 +298,23 @@ namespace owlcat
 					}
 				});
 
-			// Start commands thread. It reads commands from client
+			// Start commands thread. It reads commands from client, including the CMD_CONFIGURE
+			// that actually starts the profiler.
 			m_commands_thread = std::thread(&details::process_messages, this);
 
-			// Start the profiler
-			m_profiler.start();
+			// The profiler is started by the client's CMD_CONFIGURE (handled on the commands
+			// thread). When we blocked for a connection, block a little longer until the
+			// client has configured us, so that hooking (native mode) finishes before the
+			// game resumes. Fall back to managed-only if no configuration arrives.
+			if (wait_for_connection)
+			{
+				auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+				while (!m_profiler_started && std::chrono::steady_clock::now() < deadline && m_network.is_connected())
+					std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+				if (!m_profiler_started)
+					configure(1 /*CAPTURE_MANAGED*/, std::string());
+			}
 		}
 
 		void process_messages()
@@ -299,8 +330,26 @@ namespace owlcat
 
 				memory_reader reader(msg.data);
 
+				if (msg.header.type == protocol::command::CMD_CONFIGURE)
+				{
+					// The client selects what to capture and supplies the native-hook config;
+					// this is what actually starts the profiler.
+					uint32_t capture_flags = 0;
+					std::string native_config;
+					reader.read_uint32(capture_flags);
+					reader.read_string(native_config);
+
+					configure(capture_flags, native_config);
+					continue;
+				}
+
+				// Every other command operates on the profiler, which only exists after
+				// configuration; ignore anything that arrives before CMD_CONFIGURE.
+				if (!m_profiler_started)
+					continue;
+
 				if (msg.header.type == protocol::command::CMD_REFERENCES)
-				{					
+				{
 					uint64_t request_id;
 					uint64_t count;
 					std::vector<uint64_t> adddresses;

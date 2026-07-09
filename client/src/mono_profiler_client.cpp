@@ -568,7 +568,7 @@ namespace owlcat
 		}
 
 #if defined(WIN32)
-		mono_profiler_client::LaunchResult launch_executable(const std::string& executable, const std::string& commandline, int port, const std::string& db_file_name, const std::string& dll_location)
+		mono_profiler_client::LaunchResult launch_executable(const std::string& executable, const std::string& commandline, int port, const std::string& db_file_name, const std::string& dll_location, uint32_t capture_flags, const std::string& native_config)
 		{
 			std::filesystem::path exec_path(executable);
 			std::string cwd = exec_path.parent_path().string();
@@ -586,11 +586,24 @@ namespace owlcat
 
 			const char* dllLoc = dll_location.c_str();
 
-			if (!DetourCreateProcessWithDlls(executable.c_str(), (char*)commandline.c_str(), nullptr, nullptr, true, CREATE_DEFAULT_ERROR_MODE | CREATE_SUSPENDED, nullptr, cwd.c_str(), &si, &pi, 1, &dllLoc, nullptr))
+			// The port must be known to the injected DLL before we connect, so it goes through
+			// the environment (the child inherits it). Everything else about the capture is
+			// sent over the connection (see start -> CMD_CONFIGURE). This also finally makes
+			// the port configurable (the DLL used to hardcode 8888).
+			char port_str[16];
+			sprintf(port_str, "%d", port);
+			SetEnvironmentVariableA("OWLCAT_PROFILER_PORT", port_str);
+
+			bool created = DetourCreateProcessWithDlls(executable.c_str(), (char*)commandline.c_str(), nullptr, nullptr, true, CREATE_DEFAULT_ERROR_MODE | CREATE_SUSPENDED, nullptr, cwd.c_str(), &si, &pi, 1, &dllLoc, nullptr);
+
+			// Don't leave it lingering in our own environment
+			SetEnvironmentVariableA("OWLCAT_PROFILER_PORT", nullptr);
+
+			if (!created)
 			{
 				int error_code = GetLastError();
 				return mono_profiler_client::DETOUR_CREATE_WITH_DLL_FAILED;
-			}			
+			}
 
 			ResumeThread(pi.hThread);
 			
@@ -628,7 +641,7 @@ namespace owlcat
 				return mono_profiler_client::DETOUR_FAILED_LATE;
 
 			// We only support launching applications on the same computer, so use loopback IP
-			return start("127.0.0.1", port, db_file_name.c_str()) ? mono_profiler_client::OK : mono_profiler_client::CONNECT_FAILED;
+			return start("127.0.0.1", port, db_file_name.c_str(), capture_flags, native_config) ? mono_profiler_client::OK : mono_profiler_client::CONNECT_FAILED;
 		}
 #else
 		mono_profiler_client::LaunchResult launch_executable(const std::string& executable, const std::string& commandline, int port, const std::string& db_file_name, const std::string& dll_location)
@@ -640,13 +653,23 @@ namespace owlcat
 		}
 #endif
 
-		bool start(const std::string& addr, int server_port, const std::string& db_file_name)
+		bool start(const std::string& addr, int server_port, const std::string& db_file_name, uint32_t capture_flags, const std::string& native_config)
 		{
 			m_network_settings.addr = addr;
 			m_network_settings.port = server_port;
 
 			if (!m_network.connect(addr, server_port))
 				return false;
+
+			// Tell the server what to capture. This is the first thing sent; the in-game
+			// profiler defers its startup (and native hooking) until it receives this.
+			{
+				std::vector<uint8_t> cmd;
+				memory_writer writer(cmd);
+				writer.write_uint32(capture_flags);
+				writer.write_string(native_config.c_str());
+				m_network.write_message(protocol::command::CMD_CONFIGURE, (uint32_t)cmd.size(), cmd.data());
+			}
 
 			m_db.close();
 
@@ -1074,14 +1097,15 @@ public:
 		delete m_details;
 	}
 
-	mono_profiler_client::LaunchResult mono_profiler_client::launch_executable(const std::string& executable, const std::string& args, int port, const std::string& db_file_name, const std::string& dll_location)
+#if defined(WIN32)
+	mono_profiler_client::LaunchResult mono_profiler_client::launch_executable(const std::string& executable, const std::string& args, int port, const std::string& db_file_name, const std::string& dll_location, uint32_t capture_flags, const std::string& native_config)
 	{
-		return m_details->launch_executable(executable, args, port, db_file_name, dll_location);
+		return m_details->launch_executable(executable, args, port, db_file_name, dll_location, capture_flags, native_config);
 	}
 
-	bool mono_profiler_client::start(const std::string& addr, int server_port, const std::string& db_file_name)
+	bool mono_profiler_client::start(const std::string& addr, int server_port, const std::string& db_file_name, uint32_t capture_flags, const std::string& native_config)
 	{
-		return m_details->start(addr, server_port, db_file_name);
+		return m_details->start(addr, server_port, db_file_name, capture_flags, native_config);
 	}
 
 	void mono_profiler_client::stop()

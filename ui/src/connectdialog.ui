@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>262</width>
-    <height>99</height>
+    <width>320</width>
+    <height>240</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -18,6 +18,56 @@
   </property>
   <layout class="QGridLayout" name="gridLayout" columnstretch="2,1">
    <item row="3" column="0" colspan="2">
+    <widget class="QGroupBox" name="captureGroup">
+     <property name="title">
+      <string>Capture</string>
+     </property>
+     <layout class="QVBoxLayout" name="captureLayout">
+      <item>
+       <widget class="QCheckBox" name="trackManaged">
+        <property name="text">
+         <string>Track managed heap</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="trackNative">
+        <property name="text">
+         <string>Track native heap (requires a hook config file)</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="hookConfigLayout" stretch="3,0">
+        <item>
+         <widget class="QLineEdit" name="hookConfig">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="placeholderText">
+           <string>Hook config file</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="browseHookConfig">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="text">
+           <string>Browse</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item row="4" column="0" colspan="2">
     <layout class="QHBoxLayout">
      <property name="spacing">
       <number>6</number>
@@ -133,5 +183,26 @@
     </hint>
    </hints>
   </connection>
+  <connection>
+   <sender>browseHookConfig</sender>
+   <signal>clicked()</signal>
+   <receiver>ConnectDialog</receiver>
+   <slot>browseForHookConfig()</slot>
+  </connection>
+  <connection>
+   <sender>trackNative</sender>
+   <signal>toggled(bool)</signal>
+   <receiver>hookConfig</receiver>
+   <slot>setEnabled(bool)</slot>
+  </connection>
+  <connection>
+   <sender>trackNative</sender>
+   <signal>toggled(bool)</signal>
+   <receiver>browseHookConfig</receiver>
+   <slot>setEnabled(bool)</slot>
+  </connection>
  </connections>
+ <slots>
+  <slot>browseForHookConfig()</slot>
+ </slots>
 </ui>

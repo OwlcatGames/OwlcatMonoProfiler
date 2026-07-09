@@ -35,11 +35,12 @@ namespace owlcat
 		return 0;
 	}
 
-	worker_thread::worker_thread(events_sink* sink, logger* log, bool capture_raw_ips)
+	worker_thread::worker_thread(events_sink* sink, logger* log, bool capture_raw_ips, bool jit_available)
 		: m_events_sink(sink)
 		, m_work_items_token(m_work_items)
 		, m_logger(log)
 		, m_capture_raw_ips(capture_raw_ips)
+		, m_jit_available(jit_available)
 	{
 		// The whole point of the fixed-size backtrace buffer is to keep work_item
 		// trivially copyable, so that enqueueing it never touches the heap
@@ -130,7 +131,24 @@ namespace owlcat
 		return id;
 	}
 
-#if defined(WIN32) && OWLCAT_MONO
+	uint32_t worker_thread::intern_native_type(uint32_t label_index)
+	{
+		if (label_index >= m_native_type_ids.size())
+			return 0;
+
+		if (m_native_type_ids[label_index] < 0)
+		{
+			uint32_t id = m_next_type_id++;
+			m_native_type_ids[label_index] = (int64_t)id;
+			// Reported on the worker thread, like intern_type, so the sink's definition
+			// bookkeeping stays single-threaded
+			m_events_sink->report_type(id, m_native_type_labels[label_index].c_str());
+		}
+
+		return (uint32_t)m_native_type_ids[label_index];
+	}
+
+#if defined(WIN32)
 	/*
 		Captures raw instruction pointers of the current callstack.
 
@@ -217,6 +235,7 @@ namespace owlcat
 		return module;
 	}
 
+#if OWLCAT_MONO
 	static HMODULE mono_module()
 	{
 		static HMODULE module = GetModuleHandleA("mono-2.0-bdwgc.dll");
@@ -237,6 +256,7 @@ namespace owlcat
 
 		return nullptr;
 	}
+#endif
 
 	const worker_thread::ip_entry& worker_thread::resolve_ip(void* ip)
 	{
@@ -246,8 +266,13 @@ namespace owlcat
 
 		ip_entry entry;
 
+#if OWLCAT_MONO
 		// Is this a managed frame? Try the domain captured from the game's threads first,
-		// then the root domain
+		// then the root domain. (Mono only - IL2CPP managed code is AOT-compiled native
+		// code, so it resolves through the module+offset path below. Also skipped when the
+		// jit functions weren't resolved, e.g. native-only capture.)
+		if (m_jit_available)
+		{
 		void* domain = m_jit_domain.load(std::memory_order_relaxed);
 		void* jit_info = domain != nullptr ? jit_info_table_find_safe(domain, ip) : nullptr;
 		if (jit_info == nullptr)
@@ -269,6 +294,8 @@ namespace owlcat
 				return m_ip_cache.emplace(ip, std::move(entry)).first->second;
 			}
 		}
+		} // if (m_jit_available)
+#endif
 
 		// A native frame: report it as module+offset. This also identifies the frames
 		// belonging to the profiler itself and to the Mono runtime (the allocation
@@ -286,7 +313,11 @@ namespace owlcat
 			char line[512];
 			snprintf(line, sizeof(line) - 1, "%s+0x%llX\n", basename, (unsigned long long)((char*)ip - (char*)module));
 			entry.text = line;
-			entry.runtime_internal = module == own_module() || module == mono_module();
+			entry.runtime_internal = module == own_module();
+#if OWLCAT_MONO
+			if (module == mono_module())
+				entry.runtime_internal = true;
+#endif
 		}
 		else
 		{
@@ -323,7 +354,7 @@ namespace owlcat
 		std::string backtrace_str;
 		backtrace_str.reserve(4096);
 
-#if defined(WIN32) && OWLCAT_MONO
+#if defined(WIN32)
 		if (m_capture_raw_ips)
 		{
 			// Frames are raw instruction pointers: each resolves to either a managed method,
@@ -440,6 +471,49 @@ namespace owlcat
 				}
 			}
 
+			// ---------- Native events. These bypass m_allocations (and thus the pseudo-GC):
+			// native memory is freed explicitly, not collected.
+			if (item.type == work_item_type::native_free)
+			{
+				// Recover the freed block's size, which free(ptr) doesn't carry
+				uint64_t naddr = (uint64_t)item.obj;
+				auto it = m_native_allocations.find(naddr);
+				if (it != m_native_allocations.end())
+				{
+					m_events_sink->report_free(item.frame, naddr, it->second);
+					m_freed += it->second;
+					m_native_allocations.erase(it);
+				}
+				// A free of an untracked address (allocated before hooks were installed) is ignored
+				continue;
+			}
+
+			if (item.type == work_item_type::native_alloc)
+			{
+				callstack_entry callstack = intern_callstack(item.backtrace);
+				if (callstack.stopword)
+					continue;
+
+				uint32_t type_id = intern_native_type(item.native_type);
+				uint64_t naddr = (uint64_t)item.obj;
+
+				auto it = m_native_allocations.find(naddr);
+				if (it != m_native_allocations.end())
+				{
+					// Address already live (a missed free, or in-place realloc): report the
+					// old block freed before the new one, so size accounting stays correct
+					m_events_sink->report_free(item.frame, naddr, it->second);
+					m_freed += it->second;
+					it->second = item.size;
+				}
+				else
+					m_native_allocations.emplace(naddr, item.size);
+
+				m_events_sink->report_alloc(item.frame, naddr, item.size, type_id, callstack.id);
+				m_allocated += item.size;
+				continue;
+			}
+
 			// Report free event to client
 			if (item.type == work_item_type::free)
 			{
@@ -494,6 +568,7 @@ namespace owlcat
 		auto empty_queue = moodycamel::ConcurrentQueue<work_item>();
 		m_work_items.swap(empty_queue);
 		m_allocations.clear();
+		m_native_allocations.clear();
 	}
 
 	void worker_thread::start()
@@ -550,14 +625,17 @@ namespace owlcat
 
 		// This is a heavy call, but it can only be done here, for obvious reasons.
 		// We ease things up a bit by only collecting addresses here. do_work translates them into strings in another thread.
-#if defined(WIN32) && OWLCAT_MONO
+#if defined(WIN32)
 		if (m_capture_raw_ips)
 		{
+#if OWLCAT_MONO
 			// Refresh the domain used for jit info lookups on the worker thread. This thread
 			// is attached to the runtime (we are inside an allocation callback), so
 			// mono_domain_get is valid here, and refreshing it every time keeps the pointer
-			// good across domain reloads.
-			m_jit_domain.store(mono_functions::domain_get(), std::memory_order_relaxed);
+			// good across domain reloads. Skipped if the jit functions weren't resolved.
+			if (m_jit_available)
+				m_jit_domain.store(mono_functions::domain_get(), std::memory_order_relaxed);
+#endif
 
 			// Capture raw instruction pointers. Unlike mono_stack_walk, this doesn't perform
 			// a jit info table lookup per frame - that's where most of the capture cost is.
@@ -586,6 +664,58 @@ namespace owlcat
 		}
 		// No token: each game thread gets its own implicit producer inside the queue,
 		// so allocating threads don't synchronize with each other at all
+		m_work_items.enqueue(item);
+	}
+
+	void worker_thread::set_native_types(const std::vector<std::string>& labels)
+	{
+		m_native_type_labels = labels;
+		m_native_type_ids.assign(labels.size(), -1);
+	}
+
+	void worker_thread::add_native_allocation(uint64_t frame, uint64_t addr, uint32_t size, uint32_t label_index)
+	{
+		// Same pause gate as managed allocations
+		if (m_allocs_blocked.load(std::memory_order_relaxed))
+		{
+			std::shared_lock stop_lock(m_stop_mutex);
+		}
+
+		work_item item;
+		item.frame = frame;
+		item.klass = nullptr;
+		item.obj = (MonoObject*)addr;
+		item.size = size;
+		item.native_type = label_index;
+		item.type = work_item_type::native_alloc;
+
+#if defined(WIN32)
+		// Native frames are always raw instruction pointers
+		item.backtrace.count = capture_stack(item.backtrace.frames, (uint32_t)stack_backtrace::MAX_DEPTH);
+		item.backtrace.overflow = item.backtrace.count == stack_backtrace::MAX_DEPTH;
+#else
+		item.backtrace.count = 0;
+#endif
+
+		m_work_items.enqueue(item);
+	}
+
+	void worker_thread::add_native_free(uint64_t frame, uint64_t addr)
+	{
+		if (m_allocs_blocked.load(std::memory_order_relaxed))
+		{
+			std::shared_lock stop_lock(m_stop_mutex);
+		}
+
+		work_item item;
+		item.frame = frame;
+		item.klass = nullptr;
+		item.obj = (MonoObject*)addr;
+		item.size = 0;
+		item.native_type = 0;
+		item.type = work_item_type::native_free;
+		item.backtrace.count = 0;
+
 		m_work_items.enqueue(item);
 	}
 

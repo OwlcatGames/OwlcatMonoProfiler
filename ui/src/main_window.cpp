@@ -9,6 +9,8 @@
 #include <future>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <qmessagebox.h>
 #include <qfiledialog.h>
 #include <qcheckbox.h>
@@ -54,6 +56,20 @@ public:
     virtual QPointF sample(size_t i) const { return m_ui_data->get_size(i); }
     virtual QRectF boundingRect() const { return QRectF(m_ui_data->min_frame, 0, m_ui_data->max_frame - m_ui_data->min_frame, m_ui_data->max_size); }
 };
+
+// Reads a whole file into a string. Used to load the native-hook config, which the client
+// sends to the (possibly remote) server over the connection rather than as a path.
+static std::string read_text_file(const std::string& path)
+{
+    if (path.empty())
+        return std::string();
+    std::ifstream f(path, std::ios::binary);
+    if (!f)
+        return std::string();
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
 
 QString size_to_string(double value)
 {
@@ -379,6 +395,9 @@ void main_window::onStartProfiling()
     auto ip = dlg.ip();
     auto port = dlg.port();
 
+    uint32_t capture_flags = (dlg.trackManaged() ? owlcat::CAPTURE_MANAGED : 0) | (dlg.trackNative() ? owlcat::CAPTURE_NATIVE : 0);
+    std::string native_config = dlg.trackNative() ? read_text_file(dlg.hookConfigPath()) : std::string();
+
     m_data->clear();
     m_data->update_boundaries();
 
@@ -389,7 +408,7 @@ void main_window::onStartProfiling()
 
     m_db_file_name = std::tmpnam(0);
     
-    if (!m_client.start(ip.c_str(), port, m_db_file_name.c_str()))
+    if (!m_client.start(ip.c_str(), port, m_db_file_name.c_str(), capture_flags, native_config))
     {
         QMessageBox::critical(nullptr, "Netwok error", "Failed to connect to profiler server", QMessageBox::Ok);
         return;
@@ -434,6 +453,9 @@ void main_window::onRunUnityApp()
     int port = dlg.port();
     auto mode = dlg.mode();
 
+    uint32_t capture_flags = (dlg.trackManaged() ? owlcat::CAPTURE_MANAGED : 0) | (dlg.trackNative() ? owlcat::CAPTURE_NATIVE : 0);
+    std::string native_config = dlg.trackNative() ? read_text_file(dlg.hookConfigPath()) : std::string();
+
     m_data->clear();
     m_data->update_boundaries();
 
@@ -451,7 +473,7 @@ void main_window::onRunUnityApp()
     else
         dllPath = QApplication::applicationDirPath() + "\\mono_profiler_il2cpp.dll";
 
-    auto result = m_client.launch_executable(path, args, port, m_db_file_name.c_str(), dllPath.toStdString());
+    auto result = m_client.launch_executable(path, args, port, m_db_file_name.c_str(), dllPath.toStdString(), capture_flags, native_config);
     if (result != owlcat::mono_profiler_client::OK)
     {
         const char* error = "Unknown error";

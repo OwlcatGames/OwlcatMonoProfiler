@@ -4,6 +4,7 @@
 #include <mutex>
 #include <chrono>
 #include <cstdlib>
+#include <string>
 
 #include "mono/metadata/profiler.h"
 
@@ -11,6 +12,7 @@
 
 #include "mono_profiler.h"
 #include "worker_thread.h"
+#include "native_hooks.h"
 #include "functor.h"
 #include "mono_functions.h"
 
@@ -61,15 +63,24 @@ namespace owlcat
 		// The worker thread which does most of heavy lifting
 		std::unique_ptr<worker_thread> m_processing_thread;
 
+		// The native allocation hooks (only created when CAPTURE_NATIVE is requested)
+		std::unique_ptr<native_hooks> m_native_hooks;
+
 		// A sink for reporting events to client. mono_profiler_server is reponsible for creating and destroying it
 		events_sink* m_events_sink;
 
 		// Current frame. Atomic: written by the frame callback, read by allocation callbacks on any thread
 		std::atomic<uint64_t> m_frame_index = 0;
 
+		// What this session tracks (managed and/or native), and where the native hook config lives
+		uint32_t m_flags = CAPTURE_MANAGED;
+		std::string m_native_config;
+
 		// If true, the worker thread captures callstacks as raw instruction pointers
 		// instead of walking the stack with mono_stack_walk (see choose_backtrace_mode)
 		bool m_use_ip_capture = false;
+		// If true, the Mono jit-info lookup functions were resolved and are safe to call
+		bool m_jit_available = false;
 
 	private:
 		void on_shutdown()
@@ -137,9 +148,19 @@ namespace owlcat
 				return false;
 
 			m_logger.log_str("restarting profiling");
+
+			// Detach native hooks from the old worker before it is destroyed, so an event
+			// firing on another thread during the swap can't touch a dead worker
+			if (m_native_hooks)
+				m_native_hooks->rebind(nullptr);
+
 			m_processing_thread->stop();
-			m_processing_thread = std::make_unique<worker_thread>(m_events_sink, &m_logger, m_use_ip_capture);
+			m_processing_thread = std::make_unique<worker_thread>(m_events_sink, &m_logger, m_use_ip_capture, m_jit_available);
 			m_processing_thread->start();
+
+			// Repoint the (still installed) native hooks at the new worker
+			if (m_native_hooks)
+				m_native_hooks->rebind(m_processing_thread.get());
 
 			return true;
 		}
@@ -182,12 +203,13 @@ namespace owlcat
 		void choose_backtrace_mode()
 		{
 			m_use_ip_capture = false;
+			m_jit_available = false;
 #if defined(WIN32) && OWLCAT_MONO
 			library* module_mono = m_module_mono.get();
 
 			// These functions are only needed for the fast path: if any of them is missing,
 			// we just fall back to mono_stack_walk
-			bool jit_functions_ok =
+			m_jit_available = module_mono != nullptr &&
 				domain_get.init(module_mono, m_logger) &&
 				get_root_domain.init(module_mono, m_logger) &&
 				jit_info_table_find.init(module_mono, m_logger) &&
@@ -196,17 +218,23 @@ namespace owlcat
 			// Escape hatch, in case native unwinding doesn't work with some version of Mono
 			bool force_mono_walk = getenv("OWLCAT_PROFILER_MONO_WALK") != nullptr;
 
-			m_use_ip_capture = jit_functions_ok && !force_mono_walk;
+			m_use_ip_capture = m_jit_available && !force_mono_walk;
 
 			m_logger.log_str(m_use_ip_capture
 				? "Callstack capture: raw instruction pointers (set OWLCAT_PROFILER_MONO_WALK env var to force mono_stack_walk)"
 				: "Callstack capture: mono_stack_walk");
 #endif
+			// Native capture always uses raw instruction pointers; when native tracking is on,
+			// the managed side must use them too (the two frame kinds can't mix in one session)
+			if (m_flags & CAPTURE_NATIVE)
+				m_use_ip_capture = true;
 		}
 
-		void init(mono_profiler* profiler)
+		// Installs the Mono/IL2CPP allocation, GC and root callbacks. The worker thread
+		// must already exist (the callbacks push into it).
+		void install_managed_callbacks(mono_profiler* profiler)
 		{
-			m_logger.log_str("new profiler");
+			m_logger.log_str("installing managed callbacks");
 			//profiler = new OwlcatMonoProfiler();
 
 			// 1. Install the profiler and the function to be called when Mono shuts down (won't ever be called in Editor, so don't rely on it to do clean up there...)
@@ -282,9 +310,6 @@ namespace owlcat
 					((details*)p)->on_root_unregister((mono_byte*)start);
 				});
 #endif
-			// 7. Start worker thread that stores allocations in memory (it does a lot of heavy lifting with strings and containers, so we run it in another thread)
-			m_processing_thread = std::make_unique<worker_thread>(m_events_sink, &m_logger, m_use_ip_capture);
-			m_processing_thread->start();
 		}
 	};
 
@@ -293,44 +318,56 @@ namespace owlcat
 		m_details = new details(sink);
 	}
 
-	bool mono_profiler::start()
+	bool mono_profiler::start(uint32_t flags, const std::string& native_config)
 	{
 		// If the start is called the second time, we don't need to do anything, but
 		// restart the worker thread
 		if (m_details->try_restart_profiling())
 			return true;
 
+		m_details->m_flags = flags;
+		m_details->m_native_config = native_config;
 		m_details->m_logger.log_str("mono_profiler::start called");
 
-#if OWLCAT_MONO
-		m_details->m_logger.log_str("mono-2.0-bdwgc.dll");
-#else		
-		m_details->m_logger.log_str("GameAssembly.dll");
-#endif
+		const bool want_managed = (flags & CAPTURE_MANAGED) != 0;
+		const bool want_native = (flags & CAPTURE_NATIVE) != 0;
 
+		// Get a handle to the runtime library and resolve its functions. Needed for managed
+		// tracking; also lets native stacks symbolicate any managed frames they contain.
+		// For native-only it is best-effort (native tracking works without it).
 		// TODO: different name for *nix
-		// Get a handle to Mono library
 #if OWLCAT_MONO
 		m_details->m_module_mono = library::get_library("mono-2.0-bdwgc.dll");
-#else		
+#else
 		m_details->m_module_mono = library::get_library("GameAssembly.dll");
 #endif
 
-		if (m_details->m_module_mono == nullptr)
-		{
-			m_details->m_logger.log_str("Failed to get handle to mono-2.0-bdwgc.dll");
-			return false;
-		}
+		bool functions_ok = false;
+		if (m_details->m_module_mono != nullptr)
+			functions_ok = m_details->setup_mono_functions();
 
-		// Find Mono functions that we need
-		if (!m_details->setup_mono_functions())
+		if (want_managed && !functions_ok)
 		{
+			m_details->m_logger.log_str("Managed tracking requested but runtime functions are unavailable");
 			return false;
 		}
 
 		m_details->choose_backtrace_mode();
 
-		m_details->init(this);
+		// The worker exists regardless of mode (it interns names, symbolicates and reports)
+		m_details->m_processing_thread = std::make_unique<worker_thread>(m_details->m_events_sink, &m_details->m_logger, m_details->m_use_ip_capture, m_details->m_jit_available);
+		m_details->m_processing_thread->start();
+
+		if (want_managed)
+			m_details->install_managed_callbacks(this);
+
+		if (want_native)
+		{
+			m_details->m_native_hooks = std::make_unique<native_hooks>(m_details->m_processing_thread.get(), &m_details->m_frame_index, &m_details->m_logger);
+			int installed = m_details->m_native_hooks->install(native_config);
+			if (installed == 0)
+				m_details->m_logger.log_str("Native tracking requested but no hooks were installed (check the hook config file)");
+		}
 
 		m_details->m_logger.log_str("all OK, starting profiling");
 

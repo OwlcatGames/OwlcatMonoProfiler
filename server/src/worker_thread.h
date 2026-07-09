@@ -128,7 +128,9 @@ namespace owlcat
 			bool overflow = false;
 		};
 
-		enum class work_item_type : uint8_t {alloc, free};
+		// alloc/free are Mono events (managed by the pseudo-GC); native_alloc/native_free
+		// come from hooked native allocators and are freed explicitly (never GC-swept).
+		enum class work_item_type : uint8_t {alloc, free, native_alloc, native_free};
 		/*
 			A work item to be processed by worker thread
 		*/
@@ -136,13 +138,16 @@ namespace owlcat
 		{
 			// Frame when event happened
 			uint64_t frame;
-			// Class of allocated object (nullptr for other events)
+			// Class of allocated object (nullptr for non-Mono-alloc events). For native
+			// events, obj holds the raw native address instead.
 			MonoClass* klass = 0;
-			// Allocated object itself (nullptr for other events)
+			// Allocated object itself (nullptr for other events); native events store the address here
 			MonoObject* obj = 0;
 			// Size of allocated or freed object
 			uint32_t size;
-			// Callstack at which object was allocated (empty for other events)
+			// Index into the native type labels, for native_alloc events (see set_native_types)
+			uint32_t native_type = 0;
+			// Callstack at which object was allocated (empty for free events)
 			stack_backtrace backtrace;
 			// Type of event
 			work_item_type type;
@@ -276,6 +281,24 @@ namespace owlcat
 		std::vector<root_info> m_roots;
 
 		/*
+			Live native allocations: address -> size. Native memory is freed explicitly by
+			hooked free functions, so (unlike m_allocations) this is never touched by the
+			pseudo-GC. It exists only so a native free(ptr), which carries no size, can
+			recover the freed block's size for the size-accounting on the client.
+			Only touched from the worker thread.
+		*/
+		std::unordered_map<uint64_t, uint32_t> m_native_allocations;
+
+		/*
+			Labels for native allocation "types" (the display name of each configured hook).
+			A native allocation has no MonoClass*, so its type is the hook's label. Ids are
+			minted lazily from the same counter as Mono types (m_next_type_id), so native and
+			managed type ids never collide on the wire.
+		*/
+		std::vector<std::string> m_native_type_labels;
+		std::vector<int64_t> m_native_type_ids; // label index -> minted id, or -1 if not yet minted
+
+		/*
 			Symbol resolution caches and id interning (see do_work).
 			Mono/IL2CPP never unload classes or methods in Unity, so caching resolved
 			names by pointer is safe for the lifetime of the process.
@@ -324,8 +347,12 @@ namespace owlcat
 		// of MonoMethod* pointers from mono_stack_walk (decided once at profiler start,
 		// see mono_profiler::details::choose_backtrace_mode)
 		bool m_capture_raw_ips = false;
+		// True if the Mono jit-info lookup functions were resolved and are safe to call
+		// from resolve_ip. False for IL2CPP, or for native-only when Mono functions are
+		// unavailable - in which case raw-IP frames resolve as module+offset only.
+		bool m_jit_available = false;
 
-#if defined(WIN32) && OWLCAT_MONO
+#if defined(WIN32)
 		// A resolved instruction pointer: either a managed method line, or a native module+offset line
 		struct ip_entry
 		{
@@ -357,13 +384,15 @@ namespace owlcat
 
 		// Resolves a method name via Mono functions, caching the result by method pointer
 		const method_entry& resolve_method(MonoMethod* method);
-#if defined(WIN32) && OWLCAT_MONO
+#if defined(WIN32)
 		// Resolves a raw instruction pointer to a managed method or a native module+offset,
 		// caching the result by address
 		const ip_entry& resolve_ip(void* ip);
 #endif
 		// Returns an id for the type, reporting a definition to the client on first sight
 		uint32_t intern_type(MonoClass* klass);
+		// Returns an id for a native allocation "type" (a hook label), minting + reporting on first use
+		uint32_t intern_native_type(uint32_t label_index);
 		// Returns interned info for a callstack, reporting a definition to the client on first sight
 		callstack_entry intern_callstack(const stack_backtrace& backtrace);
 
@@ -384,7 +413,7 @@ namespace owlcat
 		void find_references_internal(uint64_t request_id, const std::vector<uint64_t>& addresses);
 
 	public:
-		worker_thread(events_sink* sink, logger* log, bool capture_raw_ips);
+		worker_thread(events_sink* sink, logger* log, bool capture_raw_ips, bool jit_available);
 		~worker_thread();		
 
 		// Starts the thread
@@ -394,6 +423,13 @@ namespace owlcat
 
 		// Adds allocation event to work queue
 		void add_allocation_async(uint64_t frame, MonoClass* klass, MonoObject* obj);
+		// Sets the display labels for native allocation types (one per configured hook).
+		// Must be called before any native events are enqueued.
+		void set_native_types(const std::vector<std::string>& labels);
+		// Adds a native allocation event (from a hooked allocator). Captures the callstack.
+		void add_native_allocation(uint64_t frame, uint64_t addr, uint32_t size, uint32_t label_index);
+		// Adds a native free event (from a hooked free). Size is recovered from m_native_allocations.
+		void add_native_free(uint64_t frame, uint64_t addr);
 		// Performs pseudo-GC operation, blocking the calling trhead. Reports free events.
 		int do_gc_sync(uint64_t frame, bool only_update_parents);
 		// Registers a GC root

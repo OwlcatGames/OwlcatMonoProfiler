@@ -32,16 +32,31 @@ namespace owlcat
 			CMD_REFERENCES = 1,
 			CMD_PAUSE,
 			CMD_RESUME,
+			// Sent by the client immediately after connecting: selects what to capture
+			// (managed/native) and carries the native-hook config text. The in-game
+			// profiler defers its startup until this arrives, so it can hook per the
+			// client's configuration (this is how the Editor / manually-instrumented
+			// builds are configured, where env vars can't reach the injected DLL).
+			CMD_CONFIGURE,
 		};
 
 		extern const char* pipe_name;
-		
+
 		extern const char* error_ok;
 		extern const char* error_symbols;
 		extern const char* error_detour;
 		extern const char* error_deque;
 		extern const char* error_detour_late;
 	}
+
+	// What a capture tracks. Sent by the client in CMD_CONFIGURE. The managed backend
+	// (Mono vs IL2CPP) is fixed at compile time (two server DLLs); these flags select
+	// managed and/or native heap tracking at runtime.
+	enum capture_flags : uint32_t
+	{
+		CAPTURE_MANAGED = 1 << 0, // Mono/IL2CPP managed heap (the pseudo-GC)
+		CAPTURE_NATIVE  = 1 << 1, // native heap, via hooked allocators (see native_hooks)
+	};
 
 	struct message
 	{

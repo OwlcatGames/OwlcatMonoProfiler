@@ -24,12 +24,19 @@ class connect_dialog : public QDialog
 public slots:
     void accept();
     void onIPSelected(QString ip);
+    void browseForHookConfig();
 
 public:
-    connect_dialog(QWidget* parent = 0);    
+    connect_dialog(QWidget* parent = 0);
 
     std::string ip();
     int port();
+    // True if managed (Mono/IL2CPP) heap tracking is enabled
+    bool trackManaged();
+    // True if native heap tracking is enabled
+    bool trackNative();
+    // Path to the native-hook config file (empty if native tracking is off)
+    std::string hookConfigPath();
 
 private:
     void trim_prev_settings();

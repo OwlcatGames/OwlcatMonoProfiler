@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "network.h" // owlcat::capture_flags
+
 namespace owlcat
 {
 	/*
@@ -52,8 +54,10 @@ namespace owlcat
 	public:
 		mono_profiler(events_sink* sink);
 
-		// Starts, or restarts the profiler
-		bool start();
+		// Starts, or restarts the profiler. flags selects managed/native tracking;
+		// native_config is the path to the native-hook config file (used only when
+		// CAPTURE_NATIVE is set).
+		bool start(uint32_t flags, const std::string& native_config);
 		// Notifies the profiler that frame number has changed
 		void on_frame();
 

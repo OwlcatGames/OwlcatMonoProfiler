@@ -20,9 +20,12 @@ run_dialog::run_dialog(QWidget* parent) :
         auto args = settings.value("arguments").toString();
         auto port = settings.value("port").toString();
         auto mode = settings.value("mode").toString();
+        auto trackManaged = settings.value("trackManaged", true).toBool();
+        auto trackNative = settings.value("trackNative").toBool();
+        auto hookConfig = settings.value("hookConfig").toString();
         auto lastTime = settings.value("lastTime").toLongLong();
 
-        m_prev_run_settings.push_back({path, args, port, mode, lastTime});
+        m_prev_run_settings.push_back({path, args, port, mode, trackManaged, trackNative, hookConfig, lastTime});
     }
     settings.endArray();
 
@@ -52,6 +55,42 @@ int run_dialog::port()
 ProfileMode run_dialog::mode()
 {
     return m_ui->modeMono->isChecked() ? PROFILE_MODE_MONO : PROFILE_MODE_IL2CPP;
+}
+
+bool run_dialog::trackManaged()
+{
+    return m_ui->trackManaged->isChecked();
+}
+
+bool run_dialog::trackNative()
+{
+    return m_ui->trackNative->isChecked();
+}
+
+std::string run_dialog::hookConfigPath()
+{
+    if (!m_ui->trackNative->isChecked())
+        return std::string();
+    return m_ui->hookConfig->text().toStdString();
+}
+
+void run_dialog::browseForHookConfig()
+{
+    QString defaultPath = QDir::currentPath();
+    if (!m_ui->hookConfig->text().isEmpty())
+    {
+        QDir d = QFileInfo(m_ui->hookConfig->text()).absoluteDir();
+        auto path = d.absolutePath();
+        if (!path.isEmpty())
+            defaultPath = path;
+    }
+
+    QString file_name = QFileDialog::getOpenFileName(this, tr("Select native hook config"),
+        defaultPath,
+        tr("Config files (*.txt *.cfg);;All files (*.*)"));
+
+    if (!file_name.isEmpty())
+        m_ui->hookConfig->setText(file_name);
 }
 
 void run_dialog::browseForApp()
@@ -105,6 +144,26 @@ void run_dialog::accept()
         return;
     }
 
+    bool track_managed = m_ui->trackManaged->isChecked();
+    bool track_native = m_ui->trackNative->isChecked();
+    QString hook_config = m_ui->hookConfig->text();
+
+    if (!track_managed && !track_native)
+    {
+        if (QMessageBox::critical(nullptr, "Nothing to track", "Select at least one of managed or native heap tracking.", QMessageBox::Ok, QMessageBox::Close) == QMessageBox::Ok)
+            reject();
+
+        return;
+    }
+
+    if (track_native && !QFileInfo::exists(hook_config))
+    {
+        if (QMessageBox::critical(nullptr, "Hook config not found", "Native heap tracking is enabled, but the specified hook config file was not found.", QMessageBox::Ok, QMessageBox::Close) == QMessageBox::Ok)
+            reject();
+
+        return;
+    }
+
     QString mode = m_ui->modeMono->isChecked() ? "mono" : "il2cpp";
 
     auto iter = std::find_if(m_prev_run_settings.begin(), m_prev_run_settings.end(), [&](auto& s) {return s.path == path; });
@@ -114,10 +173,13 @@ void run_dialog::accept()
         iter->args = args;
         iter->port = port;
         iter->mode = mode;
+        iter->track_managed = track_managed;
+        iter->track_native = track_native;
+        iter->hook_config = hook_config;
     }
     else
     {
-        m_prev_run_settings.push_back({ path, args, port, mode, time(0)});
+        m_prev_run_settings.push_back({ path, args, port, mode, track_managed, track_native, hook_config, time(0)});
     }
 
     trim_prev_settings();
@@ -132,6 +194,9 @@ void run_dialog::accept()
         settings.setValue("arguments", s.args);
         settings.setValue("port", s.port);
         settings.setValue("mode", s.mode);
+        settings.setValue("trackManaged", s.track_managed);
+        settings.setValue("trackNative", s.track_native);
+        settings.setValue("hookConfig", s.hook_config);
         settings.setValue("lastTime", (qulonglong)s.time);
     }
     settings.endArray();
@@ -151,6 +216,9 @@ void run_dialog::onPathSelected(QString path)
         m_ui->port->setText(iter->port);
         m_ui->modeMono->setChecked(iter->mode != "il2cpp");
         m_ui->modeIl2cpp->setChecked(iter->mode == "il2cpp");
+        m_ui->trackManaged->setChecked(iter->track_managed);
+        m_ui->trackNative->setChecked(iter->track_native);
+        m_ui->hookConfig->setText(iter->hook_config);
     }
 }
 

@@ -2,6 +2,9 @@
 #include "ui_connectdialog.h"
 #include <qsettings.h>
 #include <qmessagebox.h>
+#include <qfiledialog.h>
+#include <qfileinfo.h>
+#include <qdir.h>
 
 connect_dialog::connect_dialog(QWidget* parent) :
     QDialog(parent),
@@ -49,6 +52,42 @@ int connect_dialog::port()
     return m_ui->port->text().toInt();
 }
 
+bool connect_dialog::trackManaged()
+{
+    return m_ui->trackManaged->isChecked();
+}
+
+bool connect_dialog::trackNative()
+{
+    return m_ui->trackNative->isChecked();
+}
+
+std::string connect_dialog::hookConfigPath()
+{
+    if (!m_ui->trackNative->isChecked())
+        return std::string();
+    return m_ui->hookConfig->text().toStdString();
+}
+
+void connect_dialog::browseForHookConfig()
+{
+    QString defaultPath = QDir::currentPath();
+    if (!m_ui->hookConfig->text().isEmpty())
+    {
+        QDir d = QFileInfo(m_ui->hookConfig->text()).absoluteDir();
+        auto path = d.absolutePath();
+        if (!path.isEmpty())
+            defaultPath = path;
+    }
+
+    QString file_name = QFileDialog::getOpenFileName(this, tr("Select native hook config"),
+        defaultPath,
+        tr("Config files (*.txt *.cfg);;All files (*.*)"));
+
+    if (!file_name.isEmpty())
+        m_ui->hookConfig->setText(file_name);
+}
+
 void connect_dialog::accept()
 {
     auto ip = m_ui->ip->currentText();
@@ -65,6 +104,22 @@ void connect_dialog::accept()
     if (port.toUInt() == 0)
     {
         if (QMessageBox::critical(nullptr, "Port not specified", "Please specify port for profiler to use for communications. It must enabled in your firewall.", QMessageBox::Ok, QMessageBox::Close) == QMessageBox::Ok)
+            reject();
+
+        return;
+    }
+
+    if (!m_ui->trackManaged->isChecked() && !m_ui->trackNative->isChecked())
+    {
+        if (QMessageBox::critical(nullptr, "Nothing to track", "Select at least one of managed or native heap tracking.", QMessageBox::Ok, QMessageBox::Close) == QMessageBox::Ok)
+            reject();
+
+        return;
+    }
+
+    if (m_ui->trackNative->isChecked() && !QFileInfo::exists(m_ui->hookConfig->text()))
+    {
+        if (QMessageBox::critical(nullptr, "Hook config not found", "Native heap tracking is enabled, but the specified hook config file was not found.", QMessageBox::Ok, QMessageBox::Close) == QMessageBox::Ok)
             reject();
 
         return;

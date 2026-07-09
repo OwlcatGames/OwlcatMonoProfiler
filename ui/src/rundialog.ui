@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>588</width>
-    <height>321</height>
+    <height>440</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -88,6 +88,16 @@
      </property>
      <layout class="QVBoxLayout" name="verticalLayout">
       <item>
+       <widget class="QCheckBox" name="trackManaged">
+        <property name="text">
+         <string>Track managed heap</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
        <widget class="QRadioButton" name="modeMono">
         <property name="text">
          <string>Mono</string>
@@ -103,6 +113,46 @@
          <string>IL2CPP</string>
         </property>
        </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="nativeGroup">
+     <property name="title">
+      <string>Native heap</string>
+     </property>
+     <layout class="QVBoxLayout" name="nativeLayout">
+      <item>
+       <widget class="QCheckBox" name="trackNative">
+        <property name="text">
+         <string>Track native heap (requires a hook config file)</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="hookConfigLayout" stretch="3,0">
+        <item>
+         <widget class="QLineEdit" name="hookConfig">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="placeholderText">
+           <string>Hook config file</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="browseHookConfig">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="text">
+           <string>Browse</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
       </item>
      </layout>
     </widget>
@@ -221,9 +271,28 @@
     </hint>
    </hints>
   </connection>
+  <connection>
+   <sender>browseHookConfig</sender>
+   <signal>clicked()</signal>
+   <receiver>RunDialog</receiver>
+   <slot>browseForHookConfig()</slot>
+  </connection>
+  <connection>
+   <sender>trackNative</sender>
+   <signal>toggled(bool)</signal>
+   <receiver>hookConfig</receiver>
+   <slot>setEnabled(bool)</slot>
+  </connection>
+  <connection>
+   <sender>trackNative</sender>
+   <signal>toggled(bool)</signal>
+   <receiver>browseHookConfig</receiver>
+   <slot>setEnabled(bool)</slot>
+  </connection>
  </connections>
  <slots>
   <slot>browseForApp()</slot>
   <slot>onPathSelected(QString)</slot>
+  <slot>browseForHookConfig()</slot>
  </slots>
 </ui>

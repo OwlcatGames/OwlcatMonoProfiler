@@ -69,10 +69,13 @@ namespace owlcat
 		};
 
 		// Launches target executable, detouring it using profiler's DLL. Allows profiling non-instrumented apps.
-		LaunchResult launch_executable(const std::string& executable, const std::string& args, int port, const std::string& db_file_name, const std::string& dll_location);
+		// capture_flags selects managed/native tracking (owlcat::capture_flags); native_config
+		// is the text of the native-hook config file (only used when CAPTURE_NATIVE is set).
+		LaunchResult launch_executable(const std::string& executable, const std::string& args, int port, const std::string& db_file_name, const std::string& dll_location, uint32_t capture_flags = CAPTURE_MANAGED, const std::string& native_config = std::string());
 //#endif
-		// Attempts to connect to a running profiler server
-		bool start(const std::string& addr, int server_port, const std::string& db_file_name);
+		// Attempts to connect to a running profiler server, then tells it what to capture.
+		// capture_flags / native_config are sent to the server as CMD_CONFIGURE.
+		bool start(const std::string& addr, int server_port, const std::string& db_file_name, uint32_t capture_flags = CAPTURE_MANAGED, const std::string& native_config = std::string());
 		// Stops communications with profiler server. Leaves current profiling data accessible.
 		void stop();
 		// Closes profiler data database. It will no longer be accessible.
