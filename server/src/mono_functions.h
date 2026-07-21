@@ -89,6 +89,14 @@ namespace owlcat
 		typedef unsigned int (CALLING_CONV* ObjectGetSize)(MonoObject*);
 		extern mono_func<ObjectGetSize> object_get_size;
 
+		// GC heap accounting (optional, best-effort). mono_gc_get_heap_size returns the total
+		// committed managed heap (what actually grows in the process); used = heap - free.
+		// The difference between the committed heap and the tracked live objects is the GC
+		// overhead (free lists, fragmentation, un-returned pages). il2cpp exposes equivalents.
+		typedef int64_t (__stdcall* GcSizeType)();
+		extern mono_func<GcSizeType> gc_get_heap_size;
+		extern mono_func<GcSizeType> gc_get_used_size;
+
 		typedef void (*register_object_callback)(void* arr, int size, void* callback_userdata);
 		typedef void (*WorldStateChanged)();
 		struct LivenessState;

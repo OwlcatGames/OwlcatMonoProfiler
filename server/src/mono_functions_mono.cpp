@@ -27,7 +27,9 @@ namespace owlcat
 		mono_func<MethodGetClassType> method_get_class("mono_method_get_class");
 		mono_func<ObjectGetClassType> object_get_class("mono_object_get_class");
 		mono_func<ObjectGetSize> object_get_size("mono_object_get_size");
-		
+		mono_func<GcSizeType> gc_get_heap_size("mono_gc_get_heap_size");
+		mono_func<GcSizeType> gc_get_used_size("mono_gc_get_used_size");
+
 		mono_func<BeginLivenessCalculation> begin_liveness_calculation("mono_unity_liveness_calculation_begin");
 		mono_func<EndLivenessCalculation> end_liveness_calculation("mono_unity_liveness_calculation_end");
 		mono_func<CalculateLivenessFromStatics> calculate_liveness_from_statics("mono_unity_liveness_calculation_from_statics");

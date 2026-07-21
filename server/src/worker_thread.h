@@ -7,11 +7,27 @@
 #include <thread>
 #include <mutex>
 #include <shared_mutex>
+#include <condition_variable>
 #include <unordered_map>
 #include <concurrentqueue.h>
 //#include "tsl/robin_map.h"
 
 //#define DEBUG_ALLOCS
+
+// Uncomment to periodically log the sizes of the profiler server's memory-holding
+// containers (work queue, live-object map, callstack tables, network send buffer, ...)
+// to the profiler log. For diagnosing the in-game profiler's memory overhead. The
+// define lives here (not on the compiler command line) so that every translation unit
+// that includes this header agrees on worker_thread's layout.
+#define OWLCAT_PROFILER_MEMLOG
+// How often to log, in milliseconds.
+#ifndef OWLCAT_PROFILER_MEMLOG_INTERVAL_MS
+	#define OWLCAT_PROFILER_MEMLOG_INTERVAL_MS 5000
+#endif
+
+#if defined(OWLCAT_PROFILER_MEMLOG)
+	#include <chrono>
+#endif
 
 extern volatile size_t map_size;
 
@@ -90,6 +106,35 @@ namespace owlcat
 	class logger;
 
 	/*
+		A private, low-fragmentation heap for the profiler's own large, high-churn containers
+		(the live-object map, callstack table, native-allocation map). Isolating their millions
+		of small, mostly same-size node allocations from the process's shared CRT heap keeps the
+		profiler from fragmenting the game's heap (and vice versa), and lets us measure the
+		profiler's own footprint. Backed by a dedicated HeapCreate heap with the Low-Fragmentation
+		Heap enabled (see worker_thread.cpp). The definitions live in the .cpp so this header
+		doesn't pull in Windows.h.
+	*/
+	void* profiler_heap_alloc(size_t bytes);
+	void profiler_heap_free(void* p, size_t bytes) noexcept;
+	// Logical bytes currently allocated through profiler_allocator (sum of requested sizes).
+	size_t profiler_heap_logical_bytes();
+
+	template<typename T>
+	class profiler_allocator
+	{
+	public:
+		using value_type = T;
+		profiler_allocator() noexcept {}
+		template<typename U> profiler_allocator(const profiler_allocator<U>&) noexcept {}
+		template<typename U> struct rebind { using other = profiler_allocator<U>; };
+
+		T* allocate(std::size_t n) { return static_cast<T*>(profiler_heap_alloc(n * sizeof(T))); }
+		void deallocate(T* p, std::size_t n) noexcept { profiler_heap_free(p, n * sizeof(T)); }
+	};
+	template<class T, class U> bool operator==(const profiler_allocator<T>&, const profiler_allocator<U>&) noexcept { return true; }
+	template<class T, class U> bool operator!=(const profiler_allocator<T>&, const profiler_allocator<U>&) noexcept { return false; }
+
+	/*
 		Worker thread that stores current list of live allocations and handles
 		allocations and GC events
 	*/
@@ -103,9 +148,14 @@ namespace owlcat
 		// For debugging
 		//FILE* m_alloc_loc;
 
-		// Total size of allocated and deallocated memory
+		// Total size of allocated and deallocated memory (managed + native)
 		uint64_t m_allocated = 0;
 		uint64_t m_freed = 0;
+		// The native-only portion of the above, so managed live (= total - native) can be
+		// compared against what the GC reports (mono_gc_get_used_size) to tell whether the
+		// pseudo-GC is tracking the managed heap accurately or over-retaining dead objects.
+		uint64_t m_native_allocated = 0;
+		uint64_t m_native_freed = 0;
 
 		/*
 			Callstack storage. A fixed-size buffer, so that work_item is trivially copyable
@@ -215,6 +265,19 @@ namespace owlcat
 		std::atomic<bool> m_allocs_blocked = false;
 
 		/*
+			Send-side back-pressure. When the outbound buffer or the work queue grows past a
+			high-water mark (the client can't keep up), m_send_throttle is set and game
+			allocation threads block on m_throttle_cv until it drains below the low-water mark.
+			This keeps the profiler's transient buffers bounded instead of growing until OOM.
+			Separate from the pause gate (m_stop_mutex) on purpose, so back-pressure and an
+			explicit pause don't contend.
+		*/
+		std::atomic<bool> m_send_throttle{ false };
+		std::mutex m_throttle_mutex;
+		std::condition_variable m_throttle_cv;
+		uint32_t m_throttle_counter = 0;
+
+		/*
 			Information about a single allocation
 		*/
 		struct alloc_info
@@ -248,7 +311,10 @@ namespace owlcat
 
 		//using allocations_map = tsl::sparse_map<uint64_t, alloc_info, std::hash<uint64_t>, std::equal_to<uint64_t>, counting_allocator<std::pair<uint64_t, alloc_info>>>;
 		//using allocations_map = tsl::robin_map<uint64_t, alloc_info>;
-		using allocations_map = std::unordered_map<uint64_t, alloc_info>;
+		// Nodes come from the profiler's private heap: this is the highest-count container
+		// (one node per live managed object - millions), so its allocations dominate fragmentation.
+		using allocations_map = std::unordered_map<uint64_t, alloc_info, std::hash<uint64_t>, std::equal_to<uint64_t>,
+			profiler_allocator<std::pair<const uint64_t, alloc_info>>>;
 		allocations_map m_allocations;
 
 		inline uint64_t alloc_key(allocations_map::iterator& iter) { return iter->first; }
@@ -287,7 +353,8 @@ namespace owlcat
 			recover the freed block's size for the size-accounting on the client.
 			Only touched from the worker thread.
 		*/
-		std::unordered_map<uint64_t, uint32_t> m_native_allocations;
+		std::unordered_map<uint64_t, uint32_t, std::hash<uint64_t>, std::equal_to<uint64_t>,
+			profiler_allocator<std::pair<const uint64_t, uint32_t>>> m_native_allocations;
 
 		/*
 			Labels for native allocation "types" (the display name of each configured hook).
@@ -312,6 +379,8 @@ namespace owlcat
 			std::string text;
 			// True if the name contains one of m_stopwords
 			bool stopword;
+			// Interned id of this frame line (see intern_frame_line). Not set for stopword frames.
+			uint32_t frame_id = 0;
 		};
 		std::unordered_map<MonoMethod*, method_entry> m_method_cache;
 
@@ -325,16 +394,34 @@ namespace owlcat
 			// Callstacks that contain a stopword are never reported, and neither are allocations made with them
 			bool stopword;
 		};
-		// One unique interned callstack: the frame sequence (kept for equality checks) and its entry
-		struct interned_callstack
+		// A callstack is identified by a 128-bit hash of its raw frame-pointer sequence. We do
+		// not store the frames themselves (that vector-per-callstack was gigabytes and one heap
+		// allocation each); a 128-bit hash makes a collision - which would merely merge two
+		// distinct callstacks under one id - astronomically unlikely at millions of stacks.
+		struct callstack_hash
 		{
-			std::vector<void*> frames;
-			callstack_entry entry;
+			uint64_t h0, h1;
+			bool operator==(const callstack_hash& o) const { return h0 == o.h0 && h1 == o.h1; }
 		};
-		// Callstacks already reported to client, keyed by a hash of the method sequence.
-		// The bucket vector resolves hash collisions between different sequences.
-		std::unordered_map<uint64_t, std::vector<interned_callstack>> m_callstack_ids;
+		struct callstack_hash_hasher
+		{
+			size_t operator()(const callstack_hash& k) const { return (size_t)(k.h0 ^ (k.h1 * 1099511628211ULL)); }
+		};
+		// Callstacks already reported to client, keyed by the 128-bit hash. Nodes come from the
+		// profiler's private heap (millions of them).
+		std::unordered_map<callstack_hash, callstack_entry, callstack_hash_hasher, std::equal_to<callstack_hash>,
+			profiler_allocator<std::pair<const callstack_hash, callstack_entry>>> m_callstack_ids;
 		uint32_t m_next_callstack_id = 0;
+
+		// Frame lines interned by text: the same "Class.Method" / "Module.dll+0xRVA" line
+		// appears in thousands of callstacks, but is sent to the client only once (as
+		// SRV_FRAME) and thereafter referenced by id. There are only ~tens of thousands of
+		// unique lines, versus millions of unique callstacks.
+		std::unordered_map<std::string, uint32_t> m_frame_line_ids;
+		uint32_t m_next_frame_id = 0;
+		// Reused buffer for building a callstack's frame-id sequence (avoids an allocation
+		// per first-seen callstack).
+		std::vector<uint32_t> m_scratch_frame_ids;
 
 		// Highest frame seen in dequeued items so far; used to keep reported frames monotonic
 		uint64_t m_max_seen_frame = 0;
@@ -363,6 +450,8 @@ namespace owlcat
 			bool runtime_internal = false;
 			// True if the address resolved to a managed method
 			bool managed = false;
+			// Interned id of this frame line (see intern_frame_line)
+			uint32_t frame_id = 0;
 		};
 		std::unordered_map<void*, ip_entry> m_ip_cache;
 
@@ -382,6 +471,31 @@ namespace owlcat
 		// Main processing function
 		void do_work();
 
+		// Back-pressure. maybe_update_throttle (worker thread) sets/clears m_send_throttle from
+		// the send-buffer and queue sizes; wait_if_throttled (game threads) blocks while it's set.
+		void maybe_update_throttle();
+		void wait_if_throttled();
+
+#if defined(OWLCAT_PROFILER_MEMLOG)
+		// Logs the sizes of the profiler's containers, at most once per interval. Called
+		// from the worker loop, so it reads the worker-owned containers with no locking.
+		void maybe_log_memory_stats();
+		// Last time stats were logged; and a loop counter so the clock is only read
+		// occasionally (not on every processed event during a storm).
+		std::chrono::steady_clock::time_point m_last_memlog{};
+		uint32_t m_memlog_counter = 0;
+
+		// Pseudo-GC accounting captured at the last collection (post-sweep), to track how much
+		// the conservative mark over-retains versus what BoehmGC actually keeps. Measured right
+		// after the collection so it's directly comparable to the GC's used size at that instant
+		// (unlike the MEMLOG snapshot, which also counts objects allocated since the last GC).
+		uint64_t m_last_gc_kept_bytes = 0;
+		uint64_t m_last_gc_kept_count = 0;
+		uint64_t m_last_gc_freed_bytes = 0;
+		uint64_t m_last_gc_freed_count = 0;
+		int64_t m_last_gc_used_bytes = -1; // GC's own used size at that collection; -1 if unavailable
+#endif
+
 		// Resolves a method name via Mono functions, caching the result by method pointer
 		const method_entry& resolve_method(MonoMethod* method);
 #if defined(WIN32)
@@ -393,6 +507,9 @@ namespace owlcat
 		uint32_t intern_type(MonoClass* klass);
 		// Returns an id for a native allocation "type" (a hook label), minting + reporting on first use
 		uint32_t intern_native_type(uint32_t label_index);
+		// Returns an id for a single callstack frame line, reporting its definition (SRV_FRAME)
+		// to the client on first sight. Interned by text, so identical lines share an id.
+		uint32_t intern_frame_line(const std::string& text);
 		// Returns interned info for a callstack, reporting a definition to the client on first sight
 		callstack_entry intern_callstack(const stack_backtrace& backtrace);
 

@@ -14,6 +14,7 @@
 
 #include <memory_writer.h>
 #include <memory_reader.h>
+#include <profiler_thread.h>
 
 #if defined(WIN32) || defined(WIN64)
 extern bool g_is_detoured;
@@ -39,7 +40,14 @@ namespace owlcat
 				report_alloc/report_free/report_type/report_callstack), so no locking is needed.
 			*/
 			std::unordered_map<uint32_t, std::string> m_type_defs;
-			std::unordered_map<uint32_t, std::string> m_callstack_defs;
+			// Frame-line definitions, indexed by frame id (ids are dense, assigned 0..N by
+			// the worker). The ~tens of thousands of unique lines, versus millions of callstacks.
+			std::vector<std::string> m_frame_defs;
+			// Callstack definitions as {offset, count} slices into m_callstack_pool, indexed by
+			// callstack id (dense). Storing the frame-id sequences in one contiguous pool means
+			// there is no per-callstack heap allocation (millions of them would fragment the heap).
+			std::vector<std::pair<uint32_t, uint32_t>> m_callstack_defs;
+			std::vector<uint32_t> m_callstack_pool;
 			// Value of m_network.connection_generation() the definitions were last sent for
 			uint64_t m_defs_generation = 0;
 
@@ -55,14 +63,28 @@ namespace owlcat
 				m_network.write_message(protocol::message::SRV_TYPE, (uint32_t)data.size(), (uint8_t*)&data[0]);
 			}
 
-			void send_callstack(uint32_t callstack_id, const char* text)
+			void send_frame(uint32_t frame_id, const char* text)
 			{
 				static std::vector<uint8_t> data;
-				data.reserve(5 * 1024);
+				data.reserve(512);
+				data.clear();
+				memory_writer writer(data);
+				writer.write_varint(frame_id);
+				writer.write_string(text);
+
+				m_network.write_message(protocol::message::SRV_FRAME, (uint32_t)data.size(), (uint8_t*)&data[0]);
+			}
+
+			void send_callstack(uint32_t callstack_id, uint32_t offset, uint32_t count)
+			{
+				static std::vector<uint8_t> data;
+				data.reserve(1024);
 				data.clear();
 				memory_writer writer(data);
 				writer.write_varint(callstack_id);
-				writer.write_string(text);
+				writer.write_varint(count);
+				for (uint32_t i = 0; i < count; ++i)
+					writer.write_varint(m_callstack_pool[offset + i]);
 
 				m_network.write_message(protocol::message::SRV_CALLSTACK, (uint32_t)data.size(), (uint8_t*)&data[0]);
 			}
@@ -78,8 +100,11 @@ namespace owlcat
 
 				for (auto& def : m_type_defs)
 					send_type(def.first, def.second.c_str());
-				for (auto& def : m_callstack_defs)
-					send_callstack(def.first, def.second.c_str());
+				// Frames before callstacks: a callstack references frame ids
+				for (uint32_t id = 0; id < (uint32_t)m_frame_defs.size(); ++id)
+					send_frame(id, m_frame_defs[id].c_str());
+				for (uint32_t id = 0; id < (uint32_t)m_callstack_defs.size(); ++id)
+					send_callstack(id, m_callstack_defs[id].first, m_callstack_defs[id].second);
 			}
 
 		public:
@@ -137,15 +162,37 @@ namespace owlcat
 				send_type(type_id, name);
 			}
 
-			virtual void report_callstack(uint32_t callstack_id, const char* text) override
+			virtual void report_frame(uint32_t frame_id, const char* text) override
 			{
-				m_callstack_defs[callstack_id] = text;
+				if (frame_id >= m_frame_defs.size())
+					m_frame_defs.resize(frame_id + 1);
+				m_frame_defs[frame_id] = text;
 
 				if (!m_network.is_connected())
 					return;
 
 				update_definitions();
-				send_callstack(callstack_id, text);
+				send_frame(frame_id, text);
+			}
+
+			virtual void report_callstack(uint32_t callstack_id, const std::vector<uint32_t>& frame_ids) override
+			{
+				// Append the frame-id sequence to the contiguous pool and remember its slice.
+				// (On a mid-session profiler restart, ids restart at 0 and this overwrites the
+				// slice reference; the old pool bytes become dead but are freed at capture end.)
+				uint32_t offset = (uint32_t)m_callstack_pool.size();
+				uint32_t count = (uint32_t)frame_ids.size();
+				m_callstack_pool.insert(m_callstack_pool.end(), frame_ids.begin(), frame_ids.end());
+
+				if (callstack_id >= m_callstack_defs.size())
+					m_callstack_defs.resize(callstack_id + 1);
+				m_callstack_defs[callstack_id] = { offset, count };
+
+				if (!m_network.is_connected())
+					return;
+
+				update_definitions();
+				send_callstack(callstack_id, offset, count);
 			}
 
 			virtual void report_references(uint64_t request_id, const std::vector<object_references_t>& references) override
@@ -200,6 +247,74 @@ namespace owlcat
 				writer.write_uint8(ok ? 0 : 1);
 
 				m_network.write_message(protocol::message::SRV_RESUME, (uint32_t)data.size(), (uint8_t*)&data[0]);
+			}
+
+			// See OWLCAT_PROFILER_MEMLOG. Logs the definition tables (which grow with the
+			// number of unique types/callstacks - the callstack table holds the full resolved
+			// text of every stack) and the network send backlog.
+			virtual void log_memory_stats(logger* log) override
+			{
+				if (log == nullptr)
+					return;
+
+				// Approximate resident bytes of an unordered_map<uint32_t, std::string>: a list
+				// node (two pointers + the pair) per element, two iterators per bucket, plus the
+				// heap held by non-SSO strings.
+				auto def_bytes = [](const std::unordered_map<uint32_t, std::string>& m)
+				{
+					uint64_t bytes = (uint64_t)m.size() * (2 * sizeof(void*) + sizeof(std::pair<const uint32_t, std::string>))
+						+ (uint64_t)m.bucket_count() * (2 * sizeof(void*));
+					for (auto& kv : m)
+						if (kv.second.capacity() > 15)
+							bytes += kv.second.capacity() + 1;
+					return bytes;
+				};
+
+				const double MB = 1024.0 * 1024.0;
+				uint64_t type_bytes = def_bytes(m_type_defs);
+
+				// Frame lines: the vector of strings, plus each string's heap.
+				uint64_t frame_bytes = (uint64_t)m_frame_defs.capacity() * sizeof(std::string);
+				for (auto& s : m_frame_defs)
+					if (s.capacity() > 15)
+						frame_bytes += s.capacity() + 1;
+
+				// Callstacks: the {offset,count} index vector, plus the contiguous frame-id pool.
+				uint64_t cs_bytes = (uint64_t)m_callstack_defs.capacity() * sizeof(std::pair<uint32_t, uint32_t>)
+					+ (uint64_t)m_callstack_pool.capacity() * sizeof(uint32_t);
+				uint64_t net_bytes = m_network.get_pending_write_bytes();
+
+				char tmp[256];
+				snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] sink type defs:    %zu defs  ~ %.1f MB", m_type_defs.size(), type_bytes / MB);
+				log->log_str(tmp);
+				snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] sink frame defs:   %zu lines  ~ %.1f MB", m_frame_defs.size(), frame_bytes / MB);
+				log->log_str(tmp);
+				snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] sink callstack defs:%zu defs, %zu frame-refs  ~ %.1f MB", m_callstack_defs.size(), m_callstack_pool.size(), cs_bytes / MB);
+				log->log_str(tmp);
+				snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] net send buffer:   ~ %.1f MB", net_bytes / MB);
+				log->log_str(tmp);
+			}
+
+			virtual uint64_t pending_send_bytes() override
+			{
+				return m_network.get_pending_write_bytes();
+			}
+
+			virtual void report_memstats(uint64_t frame, uint64_t working_set, uint64_t committed, uint64_t gc_heap) override
+			{
+				if (!m_network.is_connected())
+					return;
+
+				static std::vector<uint8_t> data;
+				data.reserve(64);
+				data.clear();
+				memory_writer writer(data);
+				writer.write_uint64(frame);
+				writer.write_uint64(working_set);
+				writer.write_uint64(committed);
+				writer.write_uint64(gc_heap);
+
+				m_network.write_message(protocol::message::SRV_MEMSTATS, (uint32_t)data.size(), (uint8_t*)&data[0]);
 			}
 		};
 
@@ -281,7 +396,8 @@ namespace owlcat
 			// Create watchdog thread. It's sole purpose is to watch for network disconnects and enter
 			// listening mode if this happens
 			m_watchdog = std::thread([this]()
-				{					
+				{
+					t_profiler_internal_thread = true;
 					while (!m_stop_watchdog)
 					{
 						if (!m_network.is_connected() && !m_network.is_listening())
@@ -319,6 +435,9 @@ namespace owlcat
 
 		void process_messages()
 		{
+			// Profiler-owned thread (also runs find_references/pause/resume, which allocate)
+			t_profiler_internal_thread = true;
+
 			while (!m_stop_commands_thread)
 			{
 				message msg;

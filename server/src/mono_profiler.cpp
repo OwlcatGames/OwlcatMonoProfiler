@@ -16,6 +16,12 @@
 #include "functor.h"
 #include "mono_functions.h"
 
+#if defined(WIN32)
+#include <Windows.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
+#endif
+
 using namespace owlcat::mono_functions;
 
 namespace owlcat
@@ -139,6 +145,17 @@ namespace owlcat
 
 		~details()
 		{
+			// Stop the worker thread FIRST, before tearing down anything it uses. It reports
+			// through m_events_sink and logs through m_logger/m_log_sink, and (with MEMLOG)
+			// touches them on a timer independent of events, so it must be fully joined before
+			// those outlive it. Detach the native hooks first so no in-flight event feeds a
+			// stopping worker. (Member destruction below also stops the worker, but by then
+			// m_log_sink is already gone - so we must do it here, in order.)
+			if (m_native_hooks)
+				m_native_hooks->rebind(nullptr);
+			if (m_processing_thread)
+				m_processing_thread->stop();
+
 			m_log_sink.reset();
 		}
 
@@ -168,6 +185,11 @@ namespace owlcat
 		bool setup_mono_functions()
 		{
 			library* module_mono = m_module_mono.get();
+
+			// Optional GC heap-size APIs (for the managed-heap / GC-overhead metric). Resolved
+			// best-effort, outside the required set: a build without them still profiles fine.
+			gc_get_heap_size.init(module_mono, m_logger);
+			gc_get_used_size.init(module_mono, m_logger);
 
 			return
 				install_allocations_proc.init(module_mono, m_logger) &&
@@ -318,6 +340,11 @@ namespace owlcat
 		m_details = new details(sink);
 	}
 
+	mono_profiler::~mono_profiler()
+	{
+		delete m_details;
+	}
+
 	bool mono_profiler::start(uint32_t flags, const std::string& native_config)
 	{
 		// If the start is called the second time, we don't need to do anything, but
@@ -378,7 +405,24 @@ namespace owlcat
 
 	void mono_profiler::on_frame()
 	{
-		++m_details->m_frame_index;
+		uint64_t frame = ++m_details->m_frame_index;
+
+		// Snapshot whole-process memory once per frame for the committed-vs-tracked graph.
+		// All of these are cheap O(1) reads, safe to call from the game's frame thread.
+		uint64_t working_set = 0, committed = 0, gc_heap = 0;
+#if defined(WIN32)
+		PROCESS_MEMORY_COUNTERS_EX pmc{};
+		pmc.cb = sizeof(pmc);
+		if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc)))
+		{
+			working_set = pmc.WorkingSetSize;
+			committed = pmc.PrivateUsage;
+		}
+#endif
+		if (mono_functions::gc_get_heap_size.is_valid())
+			gc_heap = (uint64_t)mono_functions::gc_get_heap_size();
+
+		m_details->m_events_sink->report_memstats(frame, working_set, committed, gc_heap);
 	}
 
 	void mono_profiler::find_references(uint64_t request_id, const std::vector<uint64_t>& addresses)

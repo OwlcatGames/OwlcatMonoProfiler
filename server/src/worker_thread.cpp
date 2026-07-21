@@ -2,6 +2,7 @@
 #include "mono_functions.h"
 #include "mono_profiler.h"
 #include "logger.h"
+#include "profiler_thread.h"
 
 #include <thread>
 #include <string>
@@ -9,7 +10,14 @@
 #include <execution>
 #include <cassert>
 #include <type_traits>
+#include <new>
 #include <mono/metadata/object.h>
+
+#if defined(WIN32)
+#include <Windows.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
+#endif
 
 using namespace owlcat::mono_functions;
 
@@ -17,6 +25,60 @@ volatile size_t map_size = 0;
 
 namespace owlcat
 {
+	// ---------------- Private profiler heap (see profiler_allocator in worker_thread.h) ----------------
+
+	static std::atomic<size_t> g_profiler_heap_bytes{ 0 };
+
+#if defined(WIN32)
+	static HANDLE get_profiler_heap()
+	{
+		// Created once, lazily, on first use. Growable (max size 0), serialized (safe from any
+		// thread), with the Low-Fragmentation Heap enabled - the profiler allocates millions of
+		// small, mostly same-size nodes, which the LFH packs into size-class slabs.
+		static HANDLE heap = []() -> HANDLE
+		{
+			HANDLE h = HeapCreate(0, 0, 0);
+			if (h != nullptr)
+			{
+				ULONG lfh = 2; // LFH
+				HeapSetInformation(h, HeapCompatibilityInformation, &lfh, sizeof(lfh));
+			}
+			return h;
+		}();
+		return heap;
+	}
+#endif
+
+	void* profiler_heap_alloc(size_t bytes)
+	{
+		g_profiler_heap_bytes.fetch_add(bytes, std::memory_order_relaxed);
+#if defined(WIN32)
+		void* p = HeapAlloc(get_profiler_heap(), 0, bytes);
+#else
+		void* p = malloc(bytes);
+#endif
+		if (p == nullptr)
+			throw std::bad_alloc();
+		return p;
+	}
+
+	void profiler_heap_free(void* p, size_t bytes) noexcept
+	{
+		if (p == nullptr)
+			return;
+		g_profiler_heap_bytes.fetch_sub(bytes, std::memory_order_relaxed);
+#if defined(WIN32)
+		HeapFree(get_profiler_heap(), 0, p);
+#else
+		free(p);
+#endif
+	}
+
+	size_t profiler_heap_logical_bytes()
+	{
+		return g_profiler_heap_bytes.load(std::memory_order_relaxed);
+	}
+
 	/*
 		A callback for Mono's stack-walking function. Does nothing, but stores method pointer for now
 	*/
@@ -110,6 +172,10 @@ namespace owlcat
 			}
 		}
 
+		// Intern the line (unless it's a stopword frame, whose id is never used)
+		if (!entry.stopword)
+			entry.frame_id = intern_frame_line(entry.text);
+
 		return m_method_cache.emplace(method, std::move(entry)).first->second;
 	}
 
@@ -146,6 +212,21 @@ namespace owlcat
 		}
 
 		return (uint32_t)m_native_type_ids[label_index];
+	}
+
+	uint32_t worker_thread::intern_frame_line(const std::string& text)
+	{
+		auto iter = m_frame_line_ids.find(text);
+		if (iter != m_frame_line_ids.end())
+			return iter->second;
+
+		uint32_t id = m_next_frame_id++;
+		m_frame_line_ids.emplace(text, id);
+
+		// The definition must reach the client before any callstack that references it
+		m_events_sink->report_frame(id, text.c_str());
+
+		return id;
 	}
 
 #if defined(WIN32)
@@ -291,6 +372,7 @@ namespace owlcat
 				entry.text = resolved.text;
 				entry.stopword = resolved.stopword;
 				entry.managed = true;
+				entry.frame_id = resolved.frame_id;
 				return m_ip_cache.emplace(ip, std::move(entry)).first->second;
 			}
 		}
@@ -325,34 +407,40 @@ namespace owlcat
 			entry.text = "<unknown>\n";
 		}
 
+		// Native frames are never stopword-filtered, so always interned
+		entry.frame_id = intern_frame_line(entry.text);
+
 		return m_ip_cache.emplace(ip, std::move(entry)).first->second;
 	}
 #endif
 
 	worker_thread::callstack_entry worker_thread::intern_callstack(const stack_backtrace& backtrace)
 	{
-		// FNV-1a over the raw pointer values
-		uint64_t hash = 14695981039346656037ULL;
+		// 128-bit hash of the raw pointer sequence, via two independent mixes. We identify a
+		// callstack by this hash alone and do NOT store the frames for comparison: at millions
+		// of unique callstacks the 128-bit collision probability is negligible, and the frame
+		// vector (one heap allocation per callstack, gigabytes in total) was the single largest
+		// profiler structure.
+		uint64_t h0 = 14695981039346656037ULL;
+		uint64_t h1 = 1099511628211ULL;
 		for (uint32_t i = 0; i < backtrace.count; ++i)
 		{
-			hash ^= (uint64_t)backtrace.frames[i];
-			hash *= 1099511628211ULL;
+			uint64_t f = (uint64_t)backtrace.frames[i];
+			h0 = (h0 ^ f) * 1099511628211ULL;                      // FNV-1a
+			h1 = (h1 ^ f) * 0xff51afd7ed558ccdULL; h1 ^= h1 >> 33;  // murmur3-style mix
 		}
+		callstack_hash key{ h0, h1 };
 
-		auto& bucket = m_callstack_ids[hash];
-		for (auto& interned : bucket)
-		{
-			if (interned.frames.size() == backtrace.count &&
-				(backtrace.count == 0 || memcmp(interned.frames.data(), backtrace.frames, backtrace.count * sizeof(void*)) == 0))
-				return interned.entry;
-		}
+		auto found = m_callstack_ids.find(key);
+		if (found != m_callstack_ids.end())
+			return found->second;
 
-		// First time we see this callstack: resolve the frames (cached by pointer)
-		// and build the full text
+		// First time we see this callstack: resolve each frame to an interned line id
+		// (see intern_frame_line) and build the id sequence that defines the callstack.
+		// The full text is never assembled or sent here - only the ~unique frame lines are.
 		callstack_entry entry{ 0, false };
 
-		std::string backtrace_str;
-		backtrace_str.reserve(4096);
+		m_scratch_frame_ids.clear();
 
 #if defined(WIN32)
 		if (m_capture_raw_ips)
@@ -378,7 +466,7 @@ namespace owlcat
 
 				if (resolved.managed)
 					any_managed = true;
-				backtrace_str.append(resolved.text);
+				m_scratch_frame_ids.push_back(resolved.frame_id);
 			}
 
 			// If native unwinding can't walk through jit code on this version of Mono,
@@ -410,25 +498,272 @@ namespace owlcat
 					break;
 				}
 
-				backtrace_str.append(resolved.text);
+				m_scratch_frame_ids.push_back(resolved.frame_id);
 			}
 		}
 
 		if (!entry.stopword)
 		{
 			// This mostly means objects allocated directly from native Unity code, like scene objects
-			if (backtrace_str.empty())
-				backtrace_str = "<no stack>";
+			if (m_scratch_frame_ids.empty())
+				m_scratch_frame_ids.push_back(intern_frame_line("<no stack>"));
 
 			entry.id = m_next_callstack_id++;
 
 			// The definition must reach the client before any allocation that references it
-			m_events_sink->report_callstack(entry.id, backtrace_str.c_str());
+			m_events_sink->report_callstack(entry.id, m_scratch_frame_ids);
 		}
 
-		bucket.push_back({ std::vector<void*>(backtrace.frames, backtrace.frames + backtrace.count), entry });
+		m_callstack_ids.emplace(key, entry);
 
 		return entry;
+	}
+
+#if defined(OWLCAT_PROFILER_MEMLOG)
+	namespace
+	{
+		// Rough resident-size estimate for an MSVC std::unordered_map: each element is a
+		// list node (two pointers + the value_type), and the bucket array holds two
+		// iterators (pointers) per bucket. Does NOT include heap owned by the values
+		// (e.g. std::string / std::vector buffers) - those are summed separately where
+		// they matter. An approximation, good enough to see which container dominates.
+		template<typename Map>
+		uint64_t est_umap_bytes(const Map& m)
+		{
+			using value_type = typename Map::value_type;
+			return (uint64_t)m.size() * (2 * sizeof(void*) + sizeof(value_type))
+				+ (uint64_t)m.bucket_count() * (2 * sizeof(void*));
+		}
+	}
+
+	void worker_thread::maybe_log_memory_stats()
+	{
+		// Cheap gate: only read the clock every so often, so the diagnostic itself doesn't
+		// add a clock read to every single processed event during an allocation storm.
+		if ((++m_memlog_counter & 0x3FFF) != 0)
+			return;
+
+		auto now = std::chrono::steady_clock::now();
+		if (now - m_last_memlog < std::chrono::milliseconds(OWLCAT_PROFILER_MEMLOG_INTERVAL_MS))
+			return;
+		m_last_memlog = now;
+
+		if (m_logger == nullptr)
+			return;
+
+		const double MB = 1024.0 * 1024.0;
+		char tmp[256];
+
+		uint64_t worker_total = 0;
+		auto add = [&](uint64_t bytes) { worker_total += bytes; return bytes; };
+
+		m_logger->log_str("[MEMLOG] --- profiler server container sizes ---");
+
+		// Work queue. Each work_item embeds the fixed 64-slot frame buffer, so an item is
+		// large (~sizeof below); a backlog here is the main transient memory spike.
+		uint64_t q_items = (uint64_t)m_work_items.size_approx();
+		snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] work queue:        %llu items x %zu B  ~ %.1f MB",
+			(unsigned long long)q_items, sizeof(work_item), add(q_items * sizeof(work_item)) / MB);
+		m_logger->log_str(tmp);
+
+		// Live objects. net-live is what the profiler thinks is live (managed + native); the
+		// split lets managed-live be compared against the GC's own figure (below) to check the
+		// pseudo-GC, and shows how much of the total is native vs managed.
+		double native_live_mb = (double)((int64_t)m_native_allocated - (int64_t)m_native_freed) / MB;
+		double net_live_mb = (double)((int64_t)m_allocated - (int64_t)m_freed) / MB;
+		double managed_live_mb = net_live_mb - native_live_mb;
+		snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] live managed objs: %zu items  ~ %.1f MB  (net live %.1f MB: managed %.1f MB, native %.1f MB)",
+			m_allocations.size(), add(est_umap_bytes(m_allocations)) / MB, net_live_mb, managed_live_mb, native_live_mb);
+		m_logger->log_str(tmp);
+
+		// Parents lists (std::vector per object, only populated by a find_references pass).
+		// Tracked exactly by the counting_allocator via the global map_size.
+		snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] parents lists:     ~ %.1f MB", add((uint64_t)map_size) / MB);
+		m_logger->log_str(tmp);
+
+		// Live native allocations (addr -> size), only present with native tracking on.
+		snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] native allocs:     %zu items  ~ %.1f MB",
+			m_native_allocations.size(), add(est_umap_bytes(m_native_allocations)) / MB);
+		m_logger->log_str(tmp);
+
+		// Interned callstacks: now just the hash->id map (frames are no longer stored;
+		// callstacks are identified by a 128-bit hash).
+		snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] callstacks:        %zu unique  ~ %.1f MB",
+			m_callstack_ids.size(), add(est_umap_bytes(m_callstack_ids)) / MB);
+		m_logger->log_str(tmp);
+
+		// Interned frame lines (text -> id). The unique-line table; also holds each line's string.
+		uint64_t fl_str = 0;
+		for (auto& kv : m_frame_line_ids)
+			if (kv.first.capacity() > 15)
+				fl_str += kv.first.capacity() + 1;
+		snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] frame lines:       %zu entries  ~ %.1f MB",
+			m_frame_line_ids.size(), add(est_umap_bytes(m_frame_line_ids) + fl_str) / MB);
+		m_logger->log_str(tmp);
+
+#if defined(WIN32)
+		// Resolved-IP cache (raw-IP capture): one entry per unique instruction pointer,
+		// each with a resolved text line.
+		uint64_t ip_str = 0;
+		for (auto& kv : m_ip_cache)
+			if (kv.second.text.capacity() > 15)
+				ip_str += kv.second.text.capacity() + 1;
+		snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] ip cache:          %zu entries  ~ %.1f MB",
+			m_ip_cache.size(), add(est_umap_bytes(m_ip_cache) + ip_str) / MB);
+		m_logger->log_str(tmp);
+#endif
+
+		// Resolved-method cache (mono_stack_walk capture) and type ids.
+		uint64_t m_str = 0;
+		for (auto& kv : m_method_cache)
+			if (kv.second.text.capacity() > 15)
+				m_str += kv.second.text.capacity() + 1;
+		snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] method cache:      %zu entries  ~ %.1f MB",
+			m_method_cache.size(), add(est_umap_bytes(m_method_cache) + m_str) / MB);
+		m_logger->log_str(tmp);
+
+		snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] type ids:          %zu entries  ~ %.1f MB",
+			m_type_ids.size(), add(est_umap_bytes(m_type_ids)) / MB);
+		m_logger->log_str(tmp);
+
+		// GC working stack (reserves 1M entries) and the root list.
+		snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] gc stack:          %zu/%zu cap  ~ %.1f MB",
+			m_stack.size(), m_stack.capacity(), add((uint64_t)m_stack.capacity() * sizeof(stack_entry)) / MB);
+		m_logger->log_str(tmp);
+		snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] roots:             %zu entries  ~ %.1f MB",
+			m_roots.size(), add((uint64_t)m_roots.capacity() * sizeof(root_info)) / MB);
+		m_logger->log_str(tmp);
+
+		snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] estimated worker total: ~ %.1f MB", worker_total / MB);
+		m_logger->log_str(tmp);
+
+		// The sink owns the type/callstack definition tables and the network send buffer.
+		m_events_sink->log_memory_stats(m_logger);
+
+		// Managed heap straight from the GC: the committed heap is what actually grows in the
+		// process; the gap between it and the tracked live objects above is GC overhead (free
+		// lists, fragmentation, un-returned pages). If 'committed' is close to the process's
+		// private commit, the memory is the managed heap; if it's much smaller, the bulk is
+		// non-managed native memory.
+		if (mono_functions::gc_get_heap_size.is_valid())
+		{
+			int64_t gc_heap = mono_functions::gc_get_heap_size();
+			int64_t gc_used = mono_functions::gc_get_used_size.is_valid() ? mono_functions::gc_get_used_size() : 0;
+			snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] managed heap (GC): committed %.1f MB, used %.1f MB, free %.1f MB",
+				gc_heap / MB, gc_used / MB, (gc_heap - gc_used) / MB);
+			m_logger->log_str(tmp);
+		}
+
+		// Pseudo-GC over-retention, measured at the LAST collection (post-sweep), so it's
+		// directly comparable to the GC's used size then and excludes objects allocated since.
+		// A large, steady gap is the conservative mark keeping objects BoehmGC has freed; a
+		// growing gap would instead point to a leak in the pseudo-GC (e.g. stale roots).
+		if (m_last_gc_used_bytes >= 0)
+		{
+			double kept_mb = m_last_gc_kept_bytes / MB;
+			double used_mb = m_last_gc_used_bytes / MB;
+			double over_mb = kept_mb - used_mb;
+			double over_pct = used_mb > 0.0 ? 100.0 * over_mb / used_mb : 0.0;
+			snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] pseudo-GC last collection: kept %llu objs / %.1f MB, freed %llu objs / %.1f MB; GC used %.1f MB -> over-retention %.1f MB (%.0f%%)",
+				(unsigned long long)m_last_gc_kept_count, kept_mb,
+				(unsigned long long)m_last_gc_freed_count, m_last_gc_freed_bytes / MB,
+				used_mb, over_mb, over_pct);
+			m_logger->log_str(tmp);
+		}
+
+		// Big picture: the profiler's private heap (the object/callstack/native maps live here;
+		// this is logical bytes, so the gap to its real committed size is that heap's own
+		// fragmentation) versus the whole process. Working set is resident RAM (matches Task
+		// Manager); commit is total committed bytes. process - private-heap - game-tracked is
+		// the remaining overhead (CRT-heap fragmentation, moodycamel pool, untracked game).
+		snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] profiler private heap (logical): ~ %.1f MB", profiler_heap_logical_bytes() / MB);
+		m_logger->log_str(tmp);
+#if defined(WIN32)
+		PROCESS_MEMORY_COUNTERS_EX pmc{};
+		pmc.cb = sizeof(pmc);
+		if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc)))
+		{
+			snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] process working set: %.1f MB, commit: %.1f MB",
+				(double)pmc.WorkingSetSize / MB, (double)pmc.PrivateUsage / MB);
+			m_logger->log_str(tmp);
+		}
+
+		// Break committed memory down by region type. Allocator hooks can only see PRIVATE
+		// memory (heap + VirtualAlloc); MAPPED is file-backed (memory-mapped asset files, e.g.
+		// Unity streaming - never goes through any allocator, so it's structurally untrackable),
+		// and IMAGE is the loaded exe + DLLs. This shows how much of the "missing" memory is
+		// memory-mapped files versus private allocations we're failing to hook.
+		{
+			uint64_t priv = 0, mapped = 0, image = 0;
+			SYSTEM_INFO si;
+			GetSystemInfo(&si);
+			uint8_t* addr = (uint8_t*)si.lpMinimumApplicationAddress;
+			uint8_t* maxaddr = (uint8_t*)si.lpMaximumApplicationAddress;
+			MEMORY_BASIC_INFORMATION mbi;
+			while (addr < maxaddr && VirtualQuery(addr, &mbi, sizeof(mbi)) == sizeof(mbi))
+			{
+				if (mbi.State == MEM_COMMIT)
+				{
+					if (mbi.Type == MEM_IMAGE) image += mbi.RegionSize;
+					else if (mbi.Type == MEM_MAPPED) mapped += mbi.RegionSize;
+					else priv += mbi.RegionSize; // MEM_PRIVATE
+				}
+				uint8_t* next = (uint8_t*)mbi.BaseAddress + mbi.RegionSize;
+				if (next <= addr) break; // no forward progress: stop rather than spin/overflow
+				addr = next;
+			}
+			snprintf(tmp, sizeof(tmp) - 1, "[MEMLOG] committed by type: private %.1f MB, mapped files %.1f MB, images %.1f MB",
+				priv / MB, mapped / MB, image / MB);
+			m_logger->log_str(tmp);
+		}
+#endif
+	}
+#endif
+
+	// Back-pressure thresholds. Fixed high/low-water marks (hysteresis avoids thrashing) - an
+	// arithmetically bounded design, not an adaptive one. Healthy captures (client keeping up)
+	// keep the buffer near zero and never reach these, so there's no effect then; they only
+	// engage when the client falls behind, throttling the game to its ingest rate.
+	namespace
+	{
+		constexpr uint64_t SEND_HIGH  = 256ull * 1024 * 1024; // start throttling above this many buffered send bytes
+		constexpr uint64_t SEND_LOW   = 128ull * 1024 * 1024; // release below this
+		constexpr size_t   QUEUE_HIGH = 200000;               // ...or this many queued work items (~112 MB)
+		constexpr size_t   QUEUE_LOW  = 50000;
+	}
+
+	// Runs on the worker thread. Sets/clears the throttle from the current send-buffer and
+	// queue sizes. When it releases, game threads blocked in wait_if_throttled are woken.
+	void worker_thread::maybe_update_throttle()
+	{
+		uint64_t sent = m_events_sink != nullptr ? m_events_sink->pending_send_bytes() : 0;
+		size_t queued = m_work_items.size_approx();
+
+		if (!m_send_throttle.load(std::memory_order_relaxed))
+		{
+			if (sent > SEND_HIGH || queued > QUEUE_HIGH)
+				m_send_throttle.store(true, std::memory_order_relaxed);
+		}
+		else if (sent < SEND_LOW && queued < QUEUE_LOW)
+		{
+			{
+				std::scoped_lock lock(m_throttle_mutex);
+				m_send_throttle.store(false, std::memory_order_relaxed);
+			}
+			m_throttle_cv.notify_all();
+		}
+	}
+
+	// Runs on the game's allocation threads. Blocks while the throttle is set, so the game
+	// produces events no faster than the client can drain them. The common (un-throttled) case
+	// is a single relaxed atomic load.
+	void worker_thread::wait_if_throttled()
+	{
+		if (!m_send_throttle.load(std::memory_order_relaxed))
+			return;
+
+		std::unique_lock<std::mutex> lock(m_throttle_mutex);
+		m_throttle_cv.wait(lock, [this] { return !m_send_throttle.load(std::memory_order_relaxed) || m_stop; });
 	}
 
 	/*
@@ -436,8 +771,24 @@ namespace owlcat
 	*/
 	void worker_thread::do_work()
 	{
+		// This is a profiler-owned thread: none of its allocations should be recorded by
+		// native hooks (that would be noise, and here a feedback loop - processing an
+		// event allocates, which would enqueue another event).
+		t_profiler_internal_thread = true;
+
 		while (!m_stop)
 		{
+#if defined(OWLCAT_PROFILER_MEMLOG)
+			// Between work items only, so all worker-owned containers are read without locking
+			maybe_log_memory_stats();
+#endif
+
+			// Update send back-pressure periodically (cheap lock-free reads). Every iteration
+			// (including idle spins) advances the counter, so the throttle also releases promptly
+			// once the buffer drains.
+			if ((++m_throttle_counter & 0xFF) == 0)
+				maybe_update_throttle();
+
 			m_work_items_empty = false;
 			// If GC is in progress, block.
 			std::scoped_lock gc_lock(m_gc_mutex);
@@ -482,6 +833,7 @@ namespace owlcat
 				{
 					m_events_sink->report_free(item.frame, naddr, it->second);
 					m_freed += it->second;
+					m_native_freed += it->second;
 					m_native_allocations.erase(it);
 				}
 				// A free of an untracked address (allocated before hooks were installed) is ignored
@@ -504,6 +856,7 @@ namespace owlcat
 					// old block freed before the new one, so size accounting stays correct
 					m_events_sink->report_free(item.frame, naddr, it->second);
 					m_freed += it->second;
+					m_native_freed += it->second;
 					it->second = item.size;
 				}
 				else
@@ -511,6 +864,7 @@ namespace owlcat
 
 				m_events_sink->report_alloc(item.frame, naddr, item.size, type_id, callstack.id);
 				m_allocated += item.size;
+				m_native_allocated += item.size;
 				continue;
 			}
 
@@ -586,12 +940,24 @@ namespace owlcat
 		}
 
 		m_stop = true;
+
+		// Release any game threads blocked on send back-pressure, so they don't hang at shutdown
+		{
+			std::scoped_lock lock(m_throttle_mutex);
+			m_send_throttle.store(false, std::memory_order_relaxed);
+		}
+		m_throttle_cv.notify_all();
+
 		if (m_thread.joinable())
 			m_thread.join();
 	}
 
 	void worker_thread::add_allocation_async(uint64_t frame, MonoClass* klass, MonoObject* obj)
 	{
+		// Runs on a game thread, but this is profiler work: don't let our own allocations
+		// here (the queue growth) be recorded by native hooks
+		profiler_internal_scope internal_scope;
+
 		// Pause gate. Taking m_stop_mutex in shared mode on every allocation is an atomic
 		// RMW on a shared cache line, so the common case checks a simple flag instead.
 		// The flag is advisory: an allocation racing with pause_app can slip through once,
@@ -601,6 +967,9 @@ namespace owlcat
 			// Block until the pause or the references query ends
 			std::shared_lock stop_lock(m_stop_mutex);
 		}
+
+		// Send back-pressure: block if the client is behind, so buffers stay bounded
+		wait_if_throttled();
 		//fprintf(m_alloc_loc, "%p\n", obj);
 		//fflush(m_alloc_loc);
 
@@ -681,6 +1050,9 @@ namespace owlcat
 			std::shared_lock stop_lock(m_stop_mutex);
 		}
 
+		// Send back-pressure (allocations only; frees are never throttled - they shrink memory)
+		wait_if_throttled();
+
 		work_item item;
 		item.frame = frame;
 		item.klass = nullptr;
@@ -743,6 +1115,10 @@ namespace owlcat
 
 	int worker_thread::do_gc_internal(uint64_t frame, bool only_update_parents)
 	{
+		// The pseudo-GC runs on the game's GC thread but is profiler work (it allocates
+		// m_stack, parents lists, etc.); keep those out of native-hook recording
+		profiler_internal_scope internal_scope;
+
 		int iterations = 0;
 
 		std::scoped_lock gc_lock(m_gc_mutex);
@@ -839,6 +1215,9 @@ namespace owlcat
 		// If only parents update was requeste, do not remove unmarked objects
 		if (!only_update_parents)
 		{
+#if defined(OWLCAT_PROFILER_MEMLOG)
+			uint64_t freed_count = 0, freed_bytes = 0, kept_count = 0, kept_bytes = 0;
+#endif
 			// 3. Forget all unmarked objects
 			for (auto iter = m_allocations.begin(); iter != m_allocations.end(); )
 			{
@@ -852,14 +1231,33 @@ namespace owlcat
 					item.size = iter->second.size;
 					m_work_items.enqueue(m_work_items_token, item);
 
+#if defined(OWLCAT_PROFILER_MEMLOG)
+					++freed_count; freed_bytes += iter->second.size;
+#endif
 					//auto iter2 = iter;
 					//iter = ++iter;
 					//m_allocations.erase(iter2);
 					iter = m_allocations.erase(iter);
 				}
 				else
+				{
+#if defined(OWLCAT_PROFILER_MEMLOG)
+					++kept_count; kept_bytes += iter->second.size;
+#endif
 					++iter;
+				}
 			}
+
+#if defined(OWLCAT_PROFILER_MEMLOG)
+			// Snapshot the kept set and the GC's own used size at this instant (both post-sweep,
+			// so directly comparable). The gap is the pseudo-GC's conservative over-retention.
+			m_last_gc_freed_count = freed_count;
+			m_last_gc_freed_bytes = freed_bytes;
+			m_last_gc_kept_count = kept_count;
+			m_last_gc_kept_bytes = kept_bytes;
+			m_last_gc_used_bytes = mono_functions::gc_get_used_size.is_valid()
+				? (int64_t)mono_functions::gc_get_used_size() : -1;
+#endif
 		}
 
 		// Parents are now up to date with the object graph as of this pass
@@ -921,12 +1319,14 @@ namespace owlcat
 
 	void worker_thread::register_root(const char* start, uint64_t size)
 	{
+		profiler_internal_scope internal_scope;
 		std::scoped_lock roots_lock(m_roots_mutex);
 		m_roots.push_back({ start, size });
 	}
 
 	void worker_thread::unregister_root(const char* start)
 	{
+		profiler_internal_scope internal_scope;
 		std::scoped_lock roots_lock(m_roots_mutex);
 		auto new_end = std::remove_if(m_roots.begin(), m_roots.end(), [&](auto& r) {return r.start == start; });
 		m_roots.erase(new_end, m_roots.end());

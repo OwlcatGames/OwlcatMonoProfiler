@@ -22,6 +22,9 @@ namespace owlcat
 		mono_func(const char* name) : m_name(name), m_addr(0), m_ptr(nullptr) {}
 		mono_func(const char* name, uint64_t addr) : m_name(name), m_addr(addr), m_ptr(nullptr) {}
 
+		// True if the function was resolved (safe to call). Used for optional functions.
+		bool is_valid() const { return m_ptr != nullptr; }
+
 		/*
 		    Performs a search for the function in the specified dynamic library module
 		*/

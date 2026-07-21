@@ -58,6 +58,23 @@ namespace owlcat
                 },
             }
         },
+        //----------------------------------------------------------------
+        // Per-frame whole-process memory snapshot (see SRV_MEMSTATS): total committed and
+        // working-set bytes plus the managed GC heap, so the UI can graph committed memory
+        // against the tracked allocations (the gap is native allocator pool overhead).
+        {
+            "Add MemStats table",
+            {
+                {
+                    "CREATE TABLE MemStats("
+                    "frame INTEGER PRIMARY KEY NOT NULL,"
+                    "working_set INT NOT NULL,"
+                    "committed INT NOT NULL,"
+                    "gc_heap INT NOT NULL"
+                    ")"
+                },
+            }
+        },
     };
 
     // Important: queries are not registred before this call, so we can't use named queries here, unless we register them ourselves

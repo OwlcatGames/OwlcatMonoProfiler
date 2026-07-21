@@ -187,7 +187,7 @@ QVariant live_callstacks_by_type_model::data(const QModelIndex& index, int role)
         return (qulonglong)m_rows[row].callstack;
 
     if (col == 0)
-        return m_data->get_callstack(m_rows[row].callstack);
+        return QString::fromStdString(m_data->get_callstack(m_rows[row].callstack));
     else if (col == 1)
         return (qulonglong)m_rows[row].count;
     else
@@ -217,9 +217,9 @@ void live_callstacks_by_type_model::sort(int column, Qt::SortOrder order)
         comparer = [=](auto& r1, auto& r2) -> bool
         {
             if (order == Qt::AscendingOrder)
-                return strcmp(m_data->get_callstack(r1.callstack), m_data->get_callstack(r2.callstack)) < 0;
+                return m_data->get_callstack(r1.callstack) < m_data->get_callstack(r2.callstack);
             else
-                return strcmp(m_data->get_callstack(r1.callstack), m_data->get_callstack(r2.callstack)) > 0;
+                return m_data->get_callstack(r1.callstack) > m_data->get_callstack(r2.callstack);
         };
     }
     else if (column == 1)

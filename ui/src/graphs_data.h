@@ -15,6 +15,11 @@ private:
     std::vector<uint64_t> m_alloc_count;
     std::vector<uint64_t> m_frees_count;
     std::vector<uint64_t> m_size_points;
+    // Whole-process committed memory per frame (see SRV_MEMSTATS). Overlaid on the size graph;
+    // the gap above the tracked-size line is native allocator pool overhead.
+    std::vector<uint64_t> m_committed_points;
+    std::vector<uint64_t> m_working_set_points;
+    std::vector<uint64_t> m_gc_heap_points;
 
 public:
     int first_visible_frame = -1;
@@ -26,6 +31,7 @@ public:
     uint64_t max_allocs = 0;
     uint64_t max_frees = 0;
     int64_t max_size = 0;
+    uint64_t max_committed = 0;
 
     graphs_data(owlcat::mono_profiler_client* client);
 
@@ -43,6 +49,10 @@ public:
 
     size_t get_sizes_size();
     QPointF get_size(uint64_t frame);
+
+    // Committed-memory line (process-wide), same x-alignment as the size line
+    size_t get_committed_size();
+    QPointF get_committed(uint64_t frame);
 
     // Searches for a frame where there were any deallocations that is closest to the specified frame (for "Snap to GC" option)
     uint64_t get_closest_gc_frame(uint64_t frame) const;

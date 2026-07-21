@@ -79,6 +79,7 @@ public slots:
     void onStartProfiling();
     void onRunUnityApp();
     void onStopProfiling();
+    void onConfigureSymbolPaths();
     void onAllocationsScrolled(int);    
     void onLiveObjectTypeSelected(const QItemSelection& selected, const QItemSelection& deselected);
     void onSearchTypeSelected(const QItemSelection& selected, const QItemSelection& deselected);
@@ -109,6 +110,7 @@ private:
 
     QwtPlotHistogram m_allocations_chart;
     QwtPlotCurve m_size_chart;
+    QwtPlotCurve m_committed_chart;
     std::shared_ptr<band_picker> m_allocations_picker;
     std::shared_ptr<band_picker> m_size_picker;
 

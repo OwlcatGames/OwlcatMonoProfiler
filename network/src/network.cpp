@@ -7,6 +7,7 @@
 #include <mutex>
 
 #include "concurrentqueue.h"
+#include "profiler_thread.h"
 
 #include <asio/io_context.hpp>
 #include <asio/ip/tcp.hpp>
@@ -72,6 +73,9 @@ namespace owlcat
 		std::vector<uint8_t> m_writing;
 		// True if an async_write is in flight
 		bool m_write_in_progress = false;
+		// Total bytes currently buffered on the send side (pending + in-flight). Maintained
+		// under m_write_mutex, but read lock-free for the profiler's back-pressure decisions.
+		std::atomic<uint64_t> m_buffered_bytes{ 0 };
 
 
 #ifdef DEBUG_NETWORK
@@ -81,6 +85,10 @@ namespace owlcat
 
 		void run()
 		{
+			// Profiler-owned thread: its allocations (send/receive buffers, asio internals)
+			// must not be recorded by native hooks
+			t_profiler_internal_thread = true;
+
 			while (!m_stop)
 				m_context.run_for(std::chrono::seconds(1));
 		}
@@ -192,9 +200,12 @@ namespace owlcat
 				if (m_pending_writes.empty())
 				{
 					m_write_in_progress = false;
+					m_buffered_bytes.store(0, std::memory_order_relaxed);
 					return;
 				}
 				m_writing.swap(m_pending_writes);
+				// pending is now empty; the buffered bytes are the in-flight m_writing
+				m_buffered_bytes.store(m_writing.size(), std::memory_order_relaxed);
 			}
 
 			asio::async_write(m_socket, asio::buffer(m_writing.data(), m_writing.size()), [this](const asio::error_code& ec, size_t) { on_write_complete(ec); });
@@ -209,6 +220,7 @@ namespace owlcat
 				std::scoped_lock lock(m_write_mutex);
 				m_write_in_progress = false;
 				m_pending_writes.clear();
+				m_buffered_bytes.store(0, std::memory_order_relaxed);
 				return;
 			}
 
@@ -334,6 +346,7 @@ namespace owlcat
 			m_write_in_progress = false;
 			m_pending_writes.clear();
 			m_writing.clear();
+			m_buffered_bytes.store(0, std::memory_order_relaxed);
 
 			m_connected = connection_not_init;
 		}
@@ -361,6 +374,7 @@ namespace owlcat
 				m_pending_writes.resize(old_size + sizeof(hdr) + length);
 				memcpy(m_pending_writes.data() + old_size, &hdr, sizeof(hdr));
 				memcpy(m_pending_writes.data() + old_size + sizeof(hdr), data, length);
+				m_buffered_bytes.store(m_pending_writes.size() + m_writing.size(), std::memory_order_relaxed);
 
 				if (!m_write_in_progress)
 				{
@@ -382,6 +396,12 @@ namespace owlcat
 		size_t get_read_messages_count() const
 		{
 			return m_read_buffer.size_approx();
+		}
+
+		size_t get_pending_write_bytes()
+		{
+			// Lock-free: read on the profiler's hot path (back-pressure) and by MEMLOG.
+			return (size_t)m_buffered_bytes.load(std::memory_order_relaxed);
 		}
 	};
 
@@ -448,5 +468,10 @@ namespace owlcat
 	size_t network::get_read_messages_count() const
 	{
 		return m_details->get_read_messages_count();
-	}	
+	}
+
+	size_t network::get_pending_write_bytes() const
+	{
+		return m_details->get_pending_write_bytes();
+	}
 }

@@ -13,6 +13,8 @@
 
 #include <cstdio>
 #include <cinttypes>
+#include <cstdlib>
+#include <algorithm>
 #include <unordered_map>
 #include <vector>
 
@@ -73,10 +75,18 @@ int main(int argc, char** argv)
 	uint64_t alloc_events = 0, free_events = 0;
 	uint64_t dup_allocs = 0, dup_alloc_bytes_lost = 0;
 	uint64_t unmatched_frees = 0, unmatched_free_bytes = 0;
-	uint64_t mismatched_free_size = 0;
+	uint64_t mismatched_free_count = 0;
+	// Signed sum of (alloc_size - free_size) over matched-but-mismatched frees. This is the
+	// amount by which the graph's running total drifts from the (address-accurate) replay:
+	// when a free under-reports its size, the graph subtracts too little and over-counts.
+	int64_t mismatch_delta = 0;
 
-	std::unordered_map<uint64_t, uint32_t> live; // addr -> size
+	struct live_info { uint32_t size; uint64_t type_id; };
+	std::unordered_map<uint64_t, live_info> live; // addr -> {size, alloc type}
 	live.reserve(4 * 1024 * 1024);
+
+	// Which allocation types the mismatched frees belong to: type_id -> {count, delta bytes}
+	std::unordered_map<uint64_t, std::pair<uint64_t, int64_t>> mismatch_by_type;
 
 	reader->read_range(reader->begin_offset(), reader->end_offset(), [&](const event_view& e)
 	{
@@ -95,7 +105,7 @@ int main(int argc, char** argv)
 			}
 			else
 			{
-				live.emplace(e.addr, e.size);
+				live.emplace(e.addr, live_info{ e.size, e.type_id });
 			}
 		}
 		else
@@ -111,8 +121,15 @@ int main(int argc, char** argv)
 			}
 			else
 			{
-				if (iter->second != e.size)
-					++mismatched_free_size;
+				if (iter->second.size != e.size)
+				{
+					++mismatched_free_count;
+					int64_t d = (int64_t)iter->second.size - (int64_t)e.size;
+					mismatch_delta += d;
+					auto& m = mismatch_by_type[iter->second.type_id];
+					m.first += 1;
+					m.second += d;
+				}
 				live.erase(iter);
 			}
 		}
@@ -121,7 +138,7 @@ int main(int argc, char** argv)
 
 	uint64_t audit_live_total = 0;
 	for (auto& pair : live)
-		audit_live_total += pair.second;
+		audit_live_total += pair.second.size;
 
 	int64_t net = (int64_t)sum_alloc_bytes - (int64_t)sum_free_bytes;
 
@@ -133,18 +150,40 @@ int main(int argc, char** argv)
 	printf("\nAnomalies:\n");
 	printf("Duplicate allocs at a live address: %" PRIu64 " (%.1f Mb)\n", dup_allocs, mb(dup_alloc_bytes_lost));
 	printf("Unmatched frees: %" PRIu64 " (%.1f Mb)\n", unmatched_frees, mb(unmatched_free_bytes));
-	printf("Frees with size != alloc size: %" PRIu64 "\n", mismatched_free_size);
+	printf("Frees with size != alloc size: %" PRIu64 " (graph over-counts by %.1f Mb from these)\n",
+		mismatched_free_count, mismatch_delta / (1024.0 * 1024.0));
 
-	// A large difference between the graph and the replay that is not explained by
-	// the anomalies means events were lost or double-counted somewhere
-	const int64_t discrepancy = net - (int64_t)audit_live_total;
-	const int64_t explained = (int64_t)dup_alloc_bytes_lost + (int64_t)unmatched_free_bytes;
-	if (discrepancy > explained + 1024 * 1024 || discrepancy < -(explained + 1024 * 1024))
+	// Which allocation types are responsible for the size-mismatch drift (the graph over-count).
+	// A dominant type here is almost always VirtualAlloc/VirtualFree, whose reserve/commit/release
+	// sizes don't map onto plain alloc/free.
+	if (!mismatch_by_type.empty())
 	{
-		printf("\nWARNING: graph and replay differ by %.1f Mb beyond the explained anomalies!\n", (discrepancy - explained) / (1024.0 * 1024.0));
+		std::vector<std::pair<uint64_t, std::pair<uint64_t, int64_t>>> by_type(mismatch_by_type.begin(), mismatch_by_type.end());
+		std::sort(by_type.begin(), by_type.end(), [](const auto& a, const auto& b) { return llabs(a.second.second) > llabs(b.second.second); });
+		printf("  Size-mismatch drift by allocation type (top 10):\n");
+		for (size_t i = 0; i < by_type.size() && i < 10; ++i)
+		{
+			const char* name = data->get_type_name(by_type[i].first);
+			printf("    %-40s %6" PRIu64 " frees, %+.1f Mb\n",
+				name != nullptr ? name : "<unknown>", by_type[i].second.first, by_type[i].second.second / (1024.0 * 1024.0));
+		}
+	}
+
+	// The graph-vs-replay difference is fully explained by:
+	//   net - replay = dup_alloc_bytes_lost + mismatch_delta - unmatched_free_bytes
+	const int64_t discrepancy = net - (int64_t)audit_live_total;
+	const int64_t explained = (int64_t)dup_alloc_bytes_lost + mismatch_delta - (int64_t)unmatched_free_bytes;
+	const int64_t residual = discrepancy - explained;
+
+	printf("\nGraph - replay: %.1f Mb; explained by anomalies: %.1f Mb; residual: %.1f Mb\n",
+		discrepancy / (1024.0 * 1024.0), explained / (1024.0 * 1024.0), residual / (1024.0 * 1024.0));
+
+	if (residual > 1024 * 1024 || residual < -1024 * 1024)
+	{
+		printf("\nWARNING: %.1f Mb of the difference is NOT explained by any known anomaly - events may be lost or double-counted!\n", residual / (1024.0 * 1024.0));
 		return 2;
 	}
 
-	printf("\nOK: graph and replay are consistent\n");
+	printf("\nOK: graph and replay reconcile (the difference is fully accounted for by the anomalies above).\n");
 	return 0;
 }

@@ -7,6 +7,7 @@
 #include "db_queries.h"
 #include "event_log.h"
 #include "capture_container.h"
+#include "symbol_resolver.h"
 
 #include <memory>
 #include <string>
@@ -15,6 +16,9 @@
 #include <cassert>
 #include <atomic>
 #include <map>
+#include <deque>
+#include <mutex>
+#include <condition_variable>
 #include <unordered_map>
 #include <unordered_set>
 #include <filesystem>
@@ -88,6 +92,104 @@ namespace owlcat
 
 		resume_app_callback callback;
 	};
+
+	/*
+		A node-recycling allocator for the live-objects replay (get_live_objects). A
+		std::unordered_map allocates one node per element and frees it on erase; replaying a
+		huge capture is then billions of malloc/free calls (the profiled bottleneck - operator
+		new inside emplace). This pools fixed-size node blocks on a free list, so an erased
+		node is reused by the next emplace: the churn becomes O(1) list ops, and total memory
+		is bounded by the PEAK number of simultaneously-live objects, not the event count.
+		Single-threaded (the map is built on one thread); bucket-array allocations (n > 1) go
+		straight to operator new.
+	*/
+	class node_pool
+	{
+		struct free_block { free_block* next; };
+		free_block* m_free = nullptr;
+		size_t m_node_size = 0;
+		std::vector<char*> m_slabs;
+		char* m_cursor = nullptr;
+		size_t m_remaining = 0;
+		static const size_t k_nodes_per_slab = 64 * 1024;
+
+	public:
+		node_pool() = default;
+		node_pool(const node_pool&) = delete;
+		node_pool& operator=(const node_pool&) = delete;
+		~node_pool()
+		{
+			for (char* s : m_slabs)
+				::operator delete(s);
+		}
+
+		void* allocate_node(size_t size)
+		{
+			// Only the (fixed-size) map nodes are pooled; anything else falls back to the heap.
+			if (m_node_size == 0)
+				m_node_size = size;
+			if (size != m_node_size)
+				return ::operator new(size);
+
+			if (m_free != nullptr)
+			{
+				void* p = m_free;
+				m_free = m_free->next;
+				return p;
+			}
+			if (m_remaining == 0)
+			{
+				m_cursor = (char*)::operator new(m_node_size * k_nodes_per_slab);
+				m_slabs.push_back(m_cursor);
+				m_remaining = k_nodes_per_slab;
+			}
+			void* p = m_cursor;
+			m_cursor += m_node_size;
+			--m_remaining;
+			return p;
+		}
+
+		void free_node(void* p, size_t size)
+		{
+			if (size != m_node_size)
+			{
+				::operator delete(p);
+				return;
+			}
+			free_block* b = (free_block*)p;
+			b->next = m_free;
+			m_free = b;
+		}
+	};
+
+	template<typename T>
+	class pool_allocator
+	{
+		node_pool* m_pool;
+	public:
+		using value_type = T;
+		pool_allocator(node_pool* pool) noexcept : m_pool(pool) {}
+		template<typename U> pool_allocator(const pool_allocator<U>& o) noexcept : m_pool(o.pool()) {}
+		node_pool* pool() const noexcept { return m_pool; }
+		template<typename U> struct rebind { using other = pool_allocator<U>; };
+
+		T* allocate(size_t n)
+		{
+			// n == 1 is a map node (pooled); n > 1 is the bucket array (plain heap)
+			if (n == 1)
+				return (T*)m_pool->allocate_node(sizeof(T));
+			return (T*)::operator new(n * sizeof(T));
+		}
+		void deallocate(T* p, size_t n) noexcept
+		{
+			if (n == 1)
+				m_pool->free_node(p, sizeof(T));
+			else
+				::operator delete(p);
+		}
+	};
+	template<class T, class U> bool operator==(const pool_allocator<T>& a, const pool_allocator<U>& b) noexcept { return a.pool() == b.pool(); }
+	template<class T, class U> bool operator!=(const pool_allocator<T>& a, const pool_allocator<U>& b) noexcept { return a.pool() != b.pool(); }
 
 	class mono_profiler_client::details
 	{
@@ -182,9 +284,120 @@ namespace owlcat
 		std::unordered_map<std::string, uint64_t> m_type_to_id_map;
 		std::unordered_map<uint64_t, std::string> m_id_to_type_map;
 		
-		// Maps between callstack ID and callstack text
+		// Maps between callstack ID and callstack text (raw, as received - native frames
+		// are "Module.dll+0xRVA")
 		std::unordered_map<std::string, uint64_t> m_callstacks_to_id_map;
 		std::unordered_map<uint64_t, std::string> m_id_to_callstacks_map;
+
+		// ---- Client-side symbolication ----
+		// Native callstack frames arrive as "Module.dll+0xRVA"; a background thread resolves
+		// them to function names via local PDBs (see symbol_resolver). Kept off the network
+		// processing thread so PDB loads never stall event ingestion.
+		std::unique_ptr<symbol_resolver> m_symbol_resolver;
+		std::thread m_symbol_thread;
+		bool m_symbol_stop = false;
+		// Work queue of (callstack id, raw text) to symbolicate
+		std::deque<std::pair<uint64_t, std::string>> m_symbol_queue;
+		std::mutex m_symbol_mutex;
+		std::condition_variable m_symbol_cv;
+		// A pending symbol-path change, applied on the symbol thread (all DbgHelp use stays there)
+		std::string m_pending_symbol_path;
+		bool m_symbol_path_changed = false;
+		// Set when a new session/capture begins: the symbol thread drops its per-session
+		// state (callstack ids restart from zero each session, so it must not carry over)
+		bool m_symbol_reset = false;
+		// Symbolicated callstack text, id -> display text. Written by the symbol thread,
+		// read (copied) by the UI thread; guarded by m_display_mutex.
+		std::unordered_map<uint64_t, std::string> m_id_to_display_callstack;
+		std::mutex m_display_mutex;
+
+		// Queues a callstack for background symbolication
+		void queue_for_symbolication(uint64_t callstack_id, const std::string& raw)
+		{
+			// Nothing to resolve if there are no native frames
+			if (raw.find("+0x") == std::string::npos)
+				return;
+
+			std::scoped_lock lock(m_symbol_mutex);
+			m_symbol_queue.push_back({ callstack_id, raw });
+			m_symbol_cv.notify_one();
+		}
+
+		// The symbolication thread body
+		void symbolication_loop()
+		{
+			// All symbol callstacks seen this session, kept so we can re-resolve them all
+			// when the symbol path changes
+			std::vector<std::pair<uint64_t, std::string>> known;
+
+			while (true)
+			{
+				std::pair<uint64_t, std::string> item;
+				bool path_changed = false;
+				bool reset = false;
+				std::string new_path;
+				{
+					std::unique_lock<std::mutex> lock(m_symbol_mutex);
+					m_symbol_cv.wait(lock, [&] { return m_symbol_stop || m_symbol_reset || m_symbol_path_changed || !m_symbol_queue.empty(); });
+					if (m_symbol_stop)
+						break;
+					if (m_symbol_reset)
+					{
+						m_symbol_reset = false;
+						reset = true;
+					}
+					else if (m_symbol_path_changed)
+					{
+						m_symbol_path_changed = false;
+						path_changed = true;
+						new_path = m_pending_symbol_path;
+					}
+					else
+					{
+						item = m_symbol_queue.front();
+						m_symbol_queue.pop_front();
+					}
+				}
+
+				if (reset)
+				{
+					known.clear();
+					std::scoped_lock lock(m_display_mutex);
+					m_id_to_display_callstack.clear();
+					continue;
+				}
+
+				if (path_changed)
+				{
+					m_symbol_resolver->set_search_path(new_path);
+					// Re-resolve everything seen so far under the new path
+					{
+						std::scoped_lock lock(m_display_mutex);
+						m_id_to_display_callstack.clear();
+					}
+					for (auto& k : known)
+					{
+						std::string display = m_symbol_resolver->symbolicate(k.second);
+						if (display != k.second)
+						{
+							std::scoped_lock lock(m_display_mutex);
+							m_id_to_display_callstack[k.first] = std::move(display);
+						}
+					}
+					continue;
+				}
+
+				known.push_back(item);
+				std::string display = m_symbol_resolver->symbolicate(item.second);
+				// Only store if symbolication actually changed the text; otherwise
+				// get_callstack falls back to the raw text
+				if (display != item.second)
+				{
+					std::scoped_lock lock(m_display_mutex);
+					m_id_to_display_callstack[item.first] = std::move(display);
+				}
+			}
+		}
 
 		uint64_t m_next_type_id = 0;
 		uint64_t m_next_callstack_id = 0;
@@ -196,6 +409,12 @@ namespace owlcat
 		// canonicalized by name, so we translate every server id on arrival.
 		std::unordered_map<uint64_t, uint64_t> m_server_type_map;
 		std::unordered_map<uint64_t, uint64_t> m_server_callstack_map;
+
+		// Callstack frames are interned server-side: each unique line ("Class.Method" or
+		// "Module.dll+0xRVA") is sent once (SRV_FRAME), and a callstack (SRV_CALLSTACK) is a
+		// sequence of frame ids. We reassemble the full callstack text here on arrival and
+		// feed it into the existing pipeline unchanged, so nothing downstream needs to know.
+		std::unordered_map<uint64_t, std::string> m_server_frame_map;
 
 		std::string m_db_file_name;
 
@@ -227,6 +446,9 @@ namespace owlcat
 			m_id_to_callstacks_map.insert(std::make_pair(callstack_id, callstack));
 
 			queries::insert_callstack(m_db, callstack, callstack_id);
+
+			// Resolve its native frames to symbols in the background
+			queue_for_symbolication(callstack_id, callstack);
 
 			return callstack_id;
 		}
@@ -336,6 +558,9 @@ namespace owlcat
 
 				m_callstacks_to_id_map.insert(std::make_pair(callstack, callstack_id));
 				m_id_to_callstacks_map.insert(std::make_pair(callstack_id, callstack));
+
+				// Re-resolve symbols for a loaded capture (PDBs may be available now)
+				queue_for_symbolication(callstack_id, callstack);
 			}
 
 			auto frames_cursor = queries::select_min_max_frame(m_db);
@@ -521,18 +746,61 @@ namespace owlcat
 					else
 						printf("Received type definition, but msg is broken\n");
 				}
+				else if (msg.header.type == protocol::message::SRV_FRAME)
+				{
+					uint64_t frame_id;
+					std::string text;
+					bool all_ok =
+						reader.read_varint(frame_id) &&
+						reader.read_string(text);
+
+					if (all_ok)
+						m_server_frame_map[frame_id] = std::move(text);
+					else
+						printf("Received frame definition, but msg is broken\n");
+				}
 				else if (msg.header.type == protocol::message::SRV_CALLSTACK)
 				{
+					// A callstack is a sequence of frame ids; reassemble the full text from
+					// the frame table (each line already ends in '\n', as the old wire format did).
 					uint64_t server_id;
-					std::string callstack;
+					uint64_t count;
 					bool all_ok =
 						reader.read_varint(server_id) &&
-						reader.read_string(callstack);
+						reader.read_varint(count);
+
+					std::string callstack;
+					for (uint64_t i = 0; all_ok && i < count; ++i)
+					{
+						uint64_t frame_id;
+						if (!reader.read_varint(frame_id))
+						{
+							all_ok = false;
+							break;
+						}
+						auto iter = m_server_frame_map.find(frame_id);
+						if (iter != m_server_frame_map.end())
+							callstack.append(iter->second);
+					}
 
 					if (all_ok)
 						m_server_callstack_map[server_id] = get_or_create_callstack_id(callstack);
 					else
 						printf("Received callstack definition, but msg is broken\n");
+				}
+				else if (msg.header.type == protocol::message::SRV_MEMSTATS)
+				{
+					uint64_t frame, working_set, committed, gc_heap;
+					bool all_ok =
+						reader.read_uint64(frame) &&
+						reader.read_uint64(working_set) &&
+						reader.read_uint64(committed) &&
+						reader.read_uint64(gc_heap);
+
+					if (all_ok)
+						queries::insert_memstats(m_db, frame, working_set, committed, gc_heap);
+					else
+						printf("Received memstats, but msg is broken\n");
 				}
 				else
 				{
@@ -557,14 +825,45 @@ namespace owlcat
 		details()
 		{
 			m_data_interface.reset(new mono_profiler_client_data(this));
+
+			m_symbol_resolver = std::make_unique<symbol_resolver>();
+			m_symbol_thread = std::thread(&mono_profiler_client::details::symbolication_loop, this);
 		}
 
 		~details()
 		{
 			stop();
 
+			// Stop the symbolication thread
+			{
+				std::scoped_lock lock(m_symbol_mutex);
+				m_symbol_stop = true;
+				m_symbol_cv.notify_one();
+			}
+			if (m_symbol_thread.joinable())
+				m_symbol_thread.join();
+
 			m_db.close();
 			cleanup_extracted_files();
+		}
+
+		// Sets the symbol search path (';'-separated directories) and re-resolves all known
+		// callstacks against it. Thread-safe; the change is applied on the symbol thread.
+		void set_symbol_paths(const std::string& path)
+		{
+			std::scoped_lock lock(m_symbol_mutex);
+			m_pending_symbol_path = path;
+			m_symbol_path_changed = true;
+			m_symbol_cv.notify_one();
+		}
+
+		// Drops the symbolication thread's per-session state when a new session/capture begins
+		void reset_symbolication()
+		{
+			std::scoped_lock lock(m_symbol_mutex);
+			m_symbol_queue.clear();
+			m_symbol_reset = true;
+			m_symbol_cv.notify_one();
 		}
 
 #if defined(WIN32)
@@ -681,8 +980,10 @@ namespace owlcat
 			m_id_to_callstacks_map.clear();
 			m_server_type_map.clear();
 			m_server_callstack_map.clear();
+			m_server_frame_map.clear();
 			m_next_type_id = 0;
 			m_next_callstack_id = 0;
+			reset_symbolication();
 
 			m_frame_events.clear();
 			m_prev_frame = 0xFFFFFFFFFFFFFFFF;
@@ -804,6 +1105,7 @@ namespace owlcat
 			m_id_to_type_map.clear();
 			m_callstacks_to_id_map.clear();
 			m_id_to_callstacks_map.clear();
+			reset_symbolication();
 
 			// Unpack the container into a temporary directory: SQLite needs a plain
 			// file, and the event log is addressed by byte offsets
@@ -897,13 +1199,21 @@ namespace owlcat
 			return "";
 		}
 
-		const char* get_callstack(uint64_t callstack_id) const
+		std::string get_callstack(uint64_t callstack_id)
 		{
+			// Prefer the symbolicated text if the background resolver has produced it
+			{
+				std::scoped_lock lock(m_display_mutex);
+				auto disp = m_id_to_display_callstack.find(callstack_id);
+				if (disp != m_id_to_display_callstack.end())
+					return disp->second;
+			}
+
 			auto iter = m_id_to_callstacks_map.find(callstack_id);
 			if (iter != m_id_to_callstacks_map.end())
-				return iter->second.c_str();
+				return iter->second;
 
-			return "";
+			return std::string();
 		}
 
 		size_t get_types_count() const
@@ -1020,6 +1330,61 @@ public:
 			}
 		}
 
+		// Per-frame whole-process memory (committed, working set, GC heap). Aligned exactly like
+		// get_stats' size_points (one entry per frame in [from,to], gaps carried forward), so the
+		// UI can overlay it on the size graph. Empty for captures that predate MemStats.
+		void get_memory_series(std::vector<uint64_t>& committed_points, std::vector<uint64_t>& working_set_points, std::vector<uint64_t>& gc_heap_points, uint64_t& max_committed, uint64_t from_frame, uint64_t to_frame)
+		{
+			committed_points.clear();
+			working_set_points.clear();
+			gc_heap_points.clear();
+			max_committed = 0;
+
+			auto result = queries::select_memstats(m_db, from_frame, to_frame);
+			uint64_t prev_frame = from_frame;
+			bool first_frame = true;
+			uint64_t last_committed = 0, last_ws = 0, last_gc = 0;
+
+			auto carry_gap = [&](uint64_t begin, uint64_t end)
+			{
+				for (auto f = begin; f < end; ++f)
+				{
+					committed_points.push_back(last_committed);
+					working_set_points.push_back(last_ws);
+					gc_heap_points.push_back(last_gc);
+				}
+			};
+
+			while (result.next())
+			{
+				uint64_t frame = result.get_uint64("frame");
+				uint64_t committed = result.get_uint64("committed");
+				uint64_t ws = result.get_uint64("working_set");
+				uint64_t gc = result.get_uint64("gc_heap");
+
+				if (committed > max_committed) max_committed = committed;
+
+				if (first_frame && frame > prev_frame)
+					carry_gap(from_frame, frame);           // leading gap (carries 0)
+				else if (frame > prev_frame + 1)
+					carry_gap(prev_frame + 1, frame);       // interior gap (carries last value)
+
+				first_frame = false;
+				prev_frame = frame;
+				last_committed = committed; last_ws = ws; last_gc = gc;
+
+				committed_points.push_back(committed);
+				working_set_points.push_back(ws);
+				gc_heap_points.push_back(gc);
+			}
+
+			if (prev_frame < to_frame && !committed_points.empty())
+			{
+				for (auto f = prev_frame + 1; f <= to_frame && f <= m_max_frame; ++f)
+					carry_gap(f, f + 1);
+			}
+		}
+
 		/*
 			This function builds a list of live objects, i.e. objects that were allocated, but not freed during the
 			specified timeframe. Notice, that these are NOT ALL leaks, but some of such objects might be leaked.
@@ -1031,11 +1396,6 @@ public:
 		void get_live_objects(std::vector<live_object>& objects, int from_frame, int to_frame, progress_func_t progress_func)
 		{
 			objects.clear();
-
-			// Map of address -> live object info
-			// TODO: Try to use sparse_map or robin_map here to speed up everything?
-			std::unordered_map<uint64_t, live_object> live_objects_map;
-			live_objects_map.reserve(1024 * 1024);
 
 			// Find the byte range of the requested frames in the event log
 			auto range_cursor = queries::select_frame_event_range(m_db, from_frame, to_frame);
@@ -1052,6 +1412,20 @@ public:
 			uint64_t events_count = reader->count_events(begin_offset, end_offset);
 			uint64_t row_num = 0;
 			bool cancelled = false;
+
+			// Map of address -> live object info. Nodes come from a recycling pool, so the
+			// per-event emplace/erase churn doesn't hit the heap (see node_pool) and memory is
+			// bounded by the peak live-object count.
+			node_pool pool;
+			using map_alloc = pool_allocator<std::pair<const uint64_t, live_object>>;
+			using live_map = std::unordered_map<uint64_t, live_object, std::hash<uint64_t>, std::equal_to<uint64_t>, map_alloc>;
+			live_map live_objects_map(0, std::hash<uint64_t>(), std::equal_to<uint64_t>(), map_alloc(&pool));
+			// Size the bucket array up front to avoid repeated rehashes, but cap it: the live set
+			// (allocs still outstanding) is far smaller than the event count, so reserving the
+			// full count would allocate tens of GB of buckets for nothing. Past the cap the map
+			// grows geometrically, which is cheap now that nodes are pooled.
+			const uint64_t reserve_cap = 16ull * 1024 * 1024;
+			live_objects_map.reserve((size_t)(events_count / 4 < reserve_cap ? events_count / 4 : reserve_cap));
 
 			reader->read_range(begin_offset, end_offset, [&](const event_view& e)
 			{
@@ -1165,6 +1539,11 @@ public:
 		return m_details->get_data();
 	}
 
+	void mono_profiler_client::set_symbol_paths(const std::string& paths)
+	{
+		m_details->set_symbol_paths(paths);
+	}
+
 	void mono_profiler_client::find_objects_references(const std::vector<uint64_t>& addresses, find_references_callback callback)
 	{
 		return m_details->find_objects_references(addresses, callback);
@@ -1199,6 +1578,11 @@ public:
 		m_source->get_stats(alloc_counts, free_counts, max_allocs, max_frees, size_points, max_size, from_frame, to_frame);
 	}
 
+	void mono_profiler_client_data::get_memory_series(std::vector<uint64_t>& committed_points, std::vector<uint64_t>& working_set_points, std::vector<uint64_t>& gc_heap_points, uint64_t& max_committed, uint64_t from_frame, uint64_t to_frame)
+	{
+		m_source->get_memory_series(committed_points, working_set_points, gc_heap_points, max_committed, from_frame, to_frame);
+	}
+
 	void mono_profiler_client_data::get_live_objects(std::vector<live_object>& objects, int from, int to, progress_func_t progress_func)
 	{
 		m_source->get_live_objects(objects, from, to, progress_func);
@@ -1209,7 +1593,7 @@ public:
 		return m_source->get_type_name(type_id);
 	}
 
-	const char* mono_profiler_client_data::get_callstack(uint64_t callstack_id) const
+	std::string mono_profiler_client_data::get_callstack(uint64_t callstack_id) const
 	{
 		return m_source->get_callstack(callstack_id);
 	}

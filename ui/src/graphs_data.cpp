@@ -17,9 +17,13 @@ void graphs_data::clear()
     max_allocs = 0;
     max_frees = 0;
     max_size = 0;
+    max_committed = 0;
     m_alloc_count.clear();
     m_frees_count.clear();
     m_size_points.clear();
+    m_committed_points.clear();
+    m_working_set_points.clear();
+    m_gc_heap_points.clear();
     first_visible_frame = -1;
     last_visible_frame = -1;
 }
@@ -34,6 +38,7 @@ void graphs_data::update_region(int from, int to)
     first_visible_frame = from;
     last_visible_frame = to;
     m_data->get_frame_stats(m_alloc_count, m_frees_count, max_allocs, max_frees, m_size_points, max_size, from, to);
+    m_data->get_memory_series(m_committed_points, m_working_set_points, m_gc_heap_points, max_committed, from, to);
 }
 
 size_t graphs_data::get_allocations_count_size() { return m_alloc_count.size(); }
@@ -62,6 +67,15 @@ QPointF graphs_data::get_size(uint64_t frame)
         return QPointF();
 
     return QPointF(frame + first_visible_frame, m_size_points[frame]);
+}
+
+size_t graphs_data::get_committed_size() { return m_committed_points.size(); }
+QPointF graphs_data::get_committed(uint64_t frame)
+{
+    if (frame >= m_committed_points.size())
+        return QPointF();
+
+    return QPointF(frame + first_visible_frame, m_committed_points[frame]);
 }
 
 uint64_t graphs_data::get_closest_gc_frame(uint64_t frame) const

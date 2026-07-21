@@ -1,9 +1,11 @@
 #include "native_hooks.h"
 #include "worker_thread.h"
 #include "logger.h"
+#include "profiler_thread.h"
 
 #include <Windows.h>
 #include <tlhelp32.h>
+#include <intrin.h>
 #include "detours.h"
 
 #include <vector>
@@ -22,15 +24,31 @@
 	- target : decorated function name (resolved via the module's PDB, which the profiler
 	           already requires) OR a relative virtual address as +0xHEX from module base
 	- role   : alloc | realloc | free
-	- argmap : comma-separated key=value; keys size/ptr/oldptr; values a1..a4 (the 1st..4th
-	           integer/pointer argument, i.e. RCX,RDX,R8,R9 on x64) or 'ret' (return value).
-	           For member functions 'this' is a1, so a real size is usually a2.
+	- argmap : comma-separated key=value; keys size/ptr/oldptr/if/plane. Value slots are
+	           a1..a4 (the 1st..4th integer/pointer argument, i.e. RCX,RDX,R8,R9 on x64) or
+	           'ret' (return value). For member functions 'this' is a1, so a real size is
+	           usually a2. The size may also be a product of two args ("size=a1*a2") for
+	           calloc-style allocators whose size is count*element_size.
+	             if=aN&MASK   : record only when argument aN has any bit of MASK set (hex 0x..
+	                            or decimal). E.g. VirtualAlloc only on MEM_COMMIT (a3&0x1000),
+	                            VirtualFree only on MEM_DECOMMIT|MEM_RELEASE (a3&0xC000). This
+	                            tracks committed physical memory instead of reserved address space.
+	             plane=reserve: put this hook on the reservation plane (page commits) instead of
+	                            the default allocation plane. Reservation hooks are NOT suppressed
+	                            when they fire inside an allocation-plane hook (the usual case for
+	                            VirtualAlloc, called from Unity's allocators), so committed pages
+	                            and handed-out allocations are tracked at the same time. NOTE: when
+	                            both planes are hooked they overlap the same physical memory, so
+	                            read them per-type - don't sum the grand total.
 	- label  : quoted display name, used as the allocation "type" in the UI
 
 	Example:
 	    UnityPlayer.dll | ?AllocInternal@... | alloc   | size=a2, ptr=ret            | "Unity Alloc"
 	    UnityPlayer.dll | ?ReallocInternal@..| realloc | oldptr=a2, size=a3, ptr=ret | "Unity Realloc"
 	    UnityPlayer.dll | ?FreeInternal@...  | free    | ptr=a2                      | "Unity Free"
+	    ucrtbase.dll    | calloc             | alloc   | size=a1*a2, ptr=ret         | "CRT calloc"
+	    kernel32.dll    | VirtualAlloc       | alloc   | size=a2, ptr=ret, if=a3&0x1000, plane=reserve | "VirtualAlloc (commit)"
+	    kernel32.dll    | VirtualFree        | free    | ptr=a1, if=a3&0xC000, plane=reserve          | "VirtualFree"
 
 	Limitations (x64): the target must take at most 4 integer/pointer arguments (in
 	registers) and, for alloc/realloc, return the pointer in RAX. Functions with more
@@ -56,9 +74,25 @@ namespace owlcat
 		role_t role = ALLOC;
 		// Argument slot holding each value: 1..4 for a1..a4, 0 for the return value, -1 = none
 		int size_arg = -1;
+		// Optional second size arg: when set, the size is size_arg * size_arg2
+		// (for calloc(count, size), whose allocation size is the product).
+		int size_arg2 = -1;
 		int ptr_arg = 0;      // where the (new) pointer comes from; 0 = return value
 		int oldptr_arg = -1;  // realloc: the freed pointer
 		uint32_t label_index = 0;
+
+		// Optional flag predicate ("if=aN&MASK"): only record when args[flag_arg] has any of
+		// flag_mask's bits set. Used to record VirtualAlloc only on MEM_COMMIT and VirtualFree
+		// only on MEM_DECOMMIT|MEM_RELEASE, i.e. committed memory rather than reserved address
+		// space. flag_mask == 0 means no filter (always record).
+		int flag_arg = -1;
+		uint64_t flag_mask = 0;
+
+		// Which tracking plane this hook belongs to (see profiler_thread.h). false = allocation
+		// plane (default); true = reservation plane (VirtualAlloc pages), which is NOT suppressed
+		// when it fires inside an allocation-plane hook, so committed pages and handed-out
+		// allocations are tracked independently.
+		bool reservation = false;
 	};
 
 	// Process-wide hook state (there is one profiler per process)
@@ -67,39 +101,78 @@ namespace owlcat
 	static worker_thread* g_worker = nullptr;
 	static const std::atomic<uint64_t>* g_frame = nullptr;
 
-	// Per-thread reentrancy guard. Allocator hooks fire on any thread and our own
-	// recording path may allocate (through the same hooked allocator); without this,
-	// that would recurse forever. It also means only the outermost hooked call on a
-	// thread is recorded (nested hooked calls are treated as implementation detail).
-	static thread_local int g_in_hook = 0;
+	// The module's TLS index, emitted by the compiler because we use thread_local.
+	extern "C" unsigned long _tls_index;
 
-	struct hook_guard
+	// True once the current thread's TLS storage (and this module's block within it) exists,
+	// so that reading a thread_local is safe. A hooked heap function can be called by the OS
+	// loader WHILE it builds a new thread's TLS vector (LdrpAllocateTls); at that point the
+	// thread_local does not exist yet and touching it faults. TEB.ThreadLocalStoragePointer
+	// is at gs:[0x58] on x64.
+	static inline bool thread_tls_ready()
 	{
-		bool entered;
-		hook_guard() : entered(g_in_hook == 0) { if (entered) g_in_hook = 1; }
-		~hook_guard() { if (entered) g_in_hook = 0; }
-	};
+		void** tls_vector = (void**)__readgsqword(0x58);
+		return tls_vector != nullptr && tls_vector[_tls_index] != nullptr;
+	}
 
 	static void* dispatch(int index, void* a1, void* a2, void* a3, void* a4)
 	{
 		hook_desc& h = g_hooks[index];
 		generic_fn original = (generic_fn)h.original;
 
-		hook_guard guard;
-		// Reentrant, or the worker was momentarily detached (restart): just forward, don't record
-		if (!guard.entered || g_worker == nullptr)
+		// If this thread's TLS isn't set up yet, we're being called from inside the loader
+		// initializing a new thread (via a hooked heap allocator). We cannot touch any
+		// thread_local here; forward without recording (these allocations aren't interesting).
+		if (!thread_tls_ready() || g_worker == nullptr)
+			return original(a1, a2, a3, a4);
+
+		// The profiler's own threads and its recording path must never be recorded, on either
+		// plane (reentrancy + no self-profiling). This trumps everything below.
+		if (t_profiler_internal_thread)
+			return original(a1, a2, a3, a4);
+
+		// Within a plane, attribute nested allocations to the outermost hooked frame. The two
+		// planes are independent, so a reservation (VirtualAlloc) made inside an allocation-plane
+		// hook is still recorded - that's how committed pages and handed-out allocations coexist.
+		bool& plane_flag = h.reservation ? t_profiler_in_reservation_hook : t_profiler_in_alloc_hook;
+		if (plane_flag)
 			return original(a1, a2, a3, a4);
 
 		// args[1..4] = a1..a4; args[0] unused (0 means 'return value')
 		void* args[5] = { nullptr, a1, a2, a3, a4 };
 
+		// Optional flag predicate: only record when the chosen arg has the required bits (e.g.
+		// VirtualAlloc only on MEM_COMMIT). The real call always proceeds; we just skip recording.
+		if (h.flag_mask != 0)
+		{
+			uint64_t flags = (h.flag_arg >= 1 && h.flag_arg <= 4) ? (uint64_t)args[h.flag_arg] : 0;
+			if ((flags & h.flag_mask) == 0)
+				return original(a1, a2, a3, a4);
+		}
+
 		// Read the inputs BEFORE calling the original (realloc may free/overwrite them)
 		void* oldptr = (h.oldptr_arg >= 1 && h.oldptr_arg <= 4) ? args[h.oldptr_arg] : nullptr;
 		void* freeptr = (h.role == hook_desc::FREE && h.ptr_arg >= 1 && h.ptr_arg <= 4) ? args[h.ptr_arg] : nullptr;
-		uint32_t size = (h.size_arg >= 1 && h.size_arg <= 4) ? (uint32_t)(uint64_t)args[h.size_arg] : 0;
+		uint32_t size = 0;
+		if (h.size_arg >= 1 && h.size_arg <= 4)
+		{
+			uint64_t s = (uint64_t)args[h.size_arg];
+			if (h.size_arg2 >= 1 && h.size_arg2 <= 4) // e.g. calloc: size = count * elem_size
+				s *= (uint64_t)args[h.size_arg2];
+			size = (uint32_t)s;
+		}
 
-		void* ret = original(a1, a2, a3, a4);
+		// Run the real function with this plane's reentrancy flag set: nested same-plane hooks
+		// attribute to this frame, while the other plane still records.
+		void* ret;
+		{
+			flag_scope plane(plane_flag);
+			ret = original(a1, a2, a3, a4);
+		}
 
+		// Record with t_profiler_internal_thread set, so the recording's own allocations
+		// (callstack capture, the work queue) are not themselves recorded on either plane.
+		profiler_internal_scope scope;
 		const uint64_t frame = g_frame->load(std::memory_order_relaxed);
 
 		switch (h.role)
@@ -171,7 +244,8 @@ namespace owlcat
 		std::string label;
 	};
 
-	// Parses one "size=a2, ptr=ret" argmap into the descriptor
+	// Parses one "size=a2, ptr=ret" argmap into the descriptor. The size value may also be
+	// a product of two args ("size=a1*a2") for allocators like calloc(count, size).
 	static void parse_argmap(const std::string& argmap, hook_desc& desc)
 	{
 		std::stringstream ss(argmap);
@@ -182,12 +256,42 @@ namespace owlcat
 			if (eq == std::string::npos)
 				continue;
 			std::string key = trim(pair.substr(0, eq));
-			int slot = parse_arg_slot(pair.substr(eq + 1));
-			if (slot < 0 && key != "ptr") // ptr may legitimately be 'ret' (slot 0)
-				continue;
-			if (key == "size") desc.size_arg = slot;
-			else if (key == "ptr") desc.ptr_arg = slot;
-			else if (key == "oldptr") desc.oldptr_arg = slot;
+			std::string val = pair.substr(eq + 1);
+
+			if (key == "size")
+			{
+				auto star = val.find('*');
+				if (star != std::string::npos)
+				{
+					desc.size_arg = parse_arg_slot(val.substr(0, star));
+					desc.size_arg2 = parse_arg_slot(val.substr(star + 1));
+				}
+				else
+					desc.size_arg = parse_arg_slot(val);
+			}
+			else if (key == "ptr") // may legitimately be 'ret' (slot 0)
+				desc.ptr_arg = parse_arg_slot(val);
+			else if (key == "oldptr")
+				desc.oldptr_arg = parse_arg_slot(val);
+			else if (key == "if") // flag predicate: "aN&MASK" (MASK is hex 0x.. or decimal)
+			{
+				auto amp = val.find('&');
+				if (amp != std::string::npos)
+				{
+					int fa = parse_arg_slot(val.substr(0, amp));
+					if (fa >= 1 && fa <= 4)
+					{
+						desc.flag_arg = fa;
+						desc.flag_mask = strtoull(trim(val.substr(amp + 1)).c_str(), nullptr, 0);
+					}
+				}
+			}
+			else if (key == "plane")
+			{
+				std::string p = trim(val);
+				for (auto& c : p) c = (char)tolower((unsigned char)c);
+				desc.reservation = (p == "reserve" || p == "reservation");
+			}
 		}
 	}
 
@@ -214,8 +318,12 @@ namespace owlcat
 
 		// Defaults, then override from argmap
 		out.desc.size_arg = -1;
+		out.desc.size_arg2 = -1;
 		out.desc.ptr_arg = (out.desc.role == hook_desc::FREE) ? -1 : 0; // alloc/realloc default ptr=ret
 		out.desc.oldptr_arg = -1;
+		out.desc.flag_arg = -1;
+		out.desc.flag_mask = 0;
+		out.desc.reservation = false;
 		parse_argmap(fields[3], out.desc);
 
 		std::string label = fields[4];

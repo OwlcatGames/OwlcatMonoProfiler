@@ -2,9 +2,13 @@
 #include "ui_mainwindow.h"
 #include "connect_dialog.h"
 #include "run_dialog.h"
+#include "symbol_paths_dialog.h"
+#include <qsettings.h>
 #include "qwt_point_data.h"
 #include "qwt_picker_machine.h"
 #include "qwt_scale_widget.h"
+#include "qwt_legend.h"
+#include <execution>
 #include <algorithm>
 #include <future>
 #include <chrono>
@@ -55,6 +59,22 @@ public:
     virtual size_t size() const { return m_ui_data->get_sizes_size(); }
     virtual QPointF sample(size_t i) const { return m_ui_data->get_size(i); }
     virtual QRectF boundingRect() const { return QRectF(m_ui_data->min_frame, 0, m_ui_data->max_frame - m_ui_data->min_frame, m_ui_data->max_size); }
+};
+
+// Whole-process committed memory, overlaid on the size graph. The gap between this and the
+// tracked-size line is native allocator pool overhead (committed pages not handed out).
+class ui_data_committed : public QwtSeriesData<QPointF>
+{
+    std::shared_ptr<graphs_data> m_ui_data;
+public:
+    ui_data_committed(std::shared_ptr<graphs_data> d)
+    {
+        m_ui_data = d;
+    }
+
+    virtual size_t size() const { return m_ui_data->get_committed_size(); }
+    virtual QPointF sample(size_t i) const { return m_ui_data->get_committed(i); }
+    virtual QRectF boundingRect() const { return QRectF(m_ui_data->min_frame, 0, m_ui_data->max_frame - m_ui_data->min_frame, m_ui_data->max_committed); }
 };
 
 // Reads a whole file into a string. Used to load the native-hook config, which the client
@@ -150,6 +170,15 @@ main_window::main_window(QWidget* parent) :
 
     m_ui->setupUi(this);
 
+    // --------- Symbol paths ---------
+
+    connect(m_ui->actionSymbolPaths, &QAction::triggered, this, &main_window::onConfigureSymbolPaths);
+    // Apply the saved symbol search path so native callstacks resolve from the start
+    {
+        QStringList paths = QSettings().value("symbols/paths").toStringList();
+        m_client.set_symbol_paths(paths.join(';').toStdString());
+    }
+
     // --------- Progress bars ---------
 
     m_live_objects_types_progress.reset(new QProgressBar());
@@ -241,10 +270,20 @@ main_window::main_window(QWidget* parent) :
     m_allocations_chart.setPen(QColor::fromRgb(255, 0, 0));
     m_allocations_chart.setBrush(QBrush(QColor::fromRgb(255, 0, 0)));
 
+    // Committed-memory line first (drawn under the tracked line), red so the overhead gap reads clearly
+    m_committed_chart.attach(m_ui->sizeGraph);
+    m_committed_chart.setData(new ui_data_committed(m_data));
+    m_committed_chart.setStyle(QwtPlotCurve::Lines);
+    m_committed_chart.setPen(QColor::fromRgb(200, 40, 40));
+    m_committed_chart.setTitle("Committed (process)");
+
     m_size_chart.attach(m_ui->sizeGraph);
     m_size_chart.setData(new ui_data_size(m_data));
     m_size_chart.setStyle(QwtPlotCurve::Lines);
     m_size_chart.setPen(QColor::fromRgb(0, 0, 0));
+    m_size_chart.setTitle("Tracked allocations");
+
+    m_ui->sizeGraph->insertLegend(new QwtLegend(), QwtPlot::TopLegend);
 
     // --------- Live objects tab ---------
 
@@ -547,6 +586,22 @@ void main_window::onStopProfiling()
     m_ui->actionStart_Profiling->setEnabled(true);
     m_ui->actionSave->setEnabled(true);
     m_ui->actionStop_Profiling->setEnabled(false);
+}
+
+void main_window::onConfigureSymbolPaths()
+{
+    QSettings settings;
+    QStringList paths = settings.value("symbols/paths").toStringList();
+
+    symbol_paths_dialog dlg(paths, this);
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    paths = dlg.paths();
+    settings.setValue("symbols/paths", paths);
+
+    // Apply immediately: the client re-resolves all known callstacks in the background
+    m_client.set_symbol_paths(paths.join(';').toStdString());
 }
 
 void main_window::onAllocationsScrolled(int value)

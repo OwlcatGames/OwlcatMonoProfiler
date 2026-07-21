@@ -412,7 +412,14 @@
     <addaction name="actionSave"/>
     <addaction name="actionExit"/>
    </widget>
+   <widget class="QMenu" name="menuSettings">
+    <property name="title">
+     <string>Settings</string>
+    </property>
+    <addaction name="actionSymbolPaths"/>
+   </widget>
    <addaction name="menuFile"/>
+   <addaction name="menuSettings"/>
   </widget>
   <widget class="QStatusBar" name="statusbar"/>
   <widget class="QToolBar" name="toolBar">
@@ -454,6 +461,14 @@
   <action name="actionExit">
    <property name="text">
     <string>Exit</string>
+   </property>
+  </action>
+  <action name="actionSymbolPaths">
+   <property name="text">
+    <string>Symbol paths...</string>
+   </property>
+   <property name="toolTip">
+    <string>Configure local directories searched for PDBs to resolve native callstacks</string>
    </property>
   </action>
   <action name="actionStart_Profiling">

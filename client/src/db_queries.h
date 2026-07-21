@@ -28,6 +28,9 @@ namespace owlcat
         // frame range in the event log file
         cursor_t select_frame_event_range(db_t& db, uint64_t from_frame, uint64_t to_frame);
         cursor_t select_stats(db_t& db, uint64_t from_frame, uint64_t to_frame);
+        // Per-frame whole-process memory snapshot (see SRV_MEMSTATS)
+        bool insert_memstats(db_t& db, uint64_t frame, uint64_t working_set, uint64_t committed, uint64_t gc_heap);
+        cursor_t select_memstats(db_t& db, uint64_t from_frame, uint64_t to_frame);
         cursor_t select_types(db_t& db);
         cursor_t select_callstacks(db_t& db);
         cursor_t select_last_good_size(db_t& db, uint64_t from_frame);

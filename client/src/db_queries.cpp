@@ -14,6 +14,8 @@ namespace owlcat
         query_id_t id_select_types = "select_types";
         query_id_t id_select_callstacks = "select_callstacks";
         query_id_t id_select_last_good_size = "select_last_good_size";
+        query_id_t id_insert_memstats = "insert_memstats";
+        query_id_t id_select_memstats = "select_memstats";
 
         bool insert_type(db_t& db, const std::string& type, uint64_t id)
         {
@@ -59,6 +61,22 @@ namespace owlcat
         cursor_t select_stats(db_t& db, uint64_t from_frame, uint64_t to_frame)
         {
             return db.query_data(queries::id_select_stats, { {"from", from_frame}, {"to", to_frame} });
+        }
+
+        bool insert_memstats(db_t& db, uint64_t frame, uint64_t working_set, uint64_t committed, uint64_t gc_heap)
+        {
+            return db.query(queries::id_insert_memstats,
+                {
+                    {"frame", frame},
+                    {"working_set", working_set},
+                    {"committed", committed},
+                    {"gc_heap", gc_heap},
+                });
+        }
+
+        cursor_t select_memstats(db_t& db, uint64_t from_frame, uint64_t to_frame)
+        {
+            return db.query_data(queries::id_select_memstats, { {"from", from_frame}, {"to", to_frame} });
         }
 
         cursor_t select_types(db_t& db)
@@ -127,6 +145,16 @@ namespace owlcat
             register_query(queries::id_select_stats,
                 "SELECT frame, allocs, frees, size "
                 "FROM FrameStats "
+                "WHERE frame >= $from AND frame <= $to "
+                "ORDER BY frame"
+            );
+            register_query(queries::id_insert_memstats,
+                "INSERT OR REPLACE INTO MemStats (frame, working_set, committed, gc_heap)"
+                "VALUES ($frame, $working_set, $committed, $gc_heap)"
+            );
+            register_query(queries::id_select_memstats,
+                "SELECT frame, working_set, committed, gc_heap "
+                "FROM MemStats "
                 "WHERE frame >= $from AND frame <= $to "
                 "ORDER BY frame"
             );

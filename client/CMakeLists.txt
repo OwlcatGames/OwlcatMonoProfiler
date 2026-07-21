@@ -20,6 +20,8 @@ set( ALL_SOURCES
     ${SOURCES_ROOT}/event_log.cpp
     ${SOURCES_ROOT}/capture_container.h
     ${SOURCES_ROOT}/capture_container.cpp
+    ${SOURCES_ROOT}/symbol_resolver.h
+    ${SOURCES_ROOT}/symbol_resolver.cpp
 )
 
 # ---------------- Targets ----------------

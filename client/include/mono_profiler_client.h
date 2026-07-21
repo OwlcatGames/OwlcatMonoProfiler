@@ -103,6 +103,11 @@ namespace owlcat
 		// capture is open). Used by diagnostic tools to access the raw event stream.
 		const char* get_event_log_path() const;
 
+		// Sets the local symbol search path (';'-separated directories) used to resolve
+		// native callstack frames to function names. Applied in the background and
+		// re-resolves all known callstacks.
+		void set_symbol_paths(const std::string& paths);
+
 		// Returns an interface for querying profiling data
 		mono_profiler_client_data* get_data();
 
@@ -162,12 +167,16 @@ namespace owlcat
 		void get_frame_boundaries(uint64_t& min, uint64_t& max);
 		// Get number of allocations, frees, maximum number of allocations, frees and running total of allocated memory for the specified timeframe
 		void get_frame_stats(std::vector<uint64_t>& alloc_counts, std::vector<uint64_t>& free_counts, uint64_t& max_allocs, uint64_t& max_frees, std::vector<uint64_t>& size_points, int64_t& max_size, uint64_t from_frame, uint64_t to_frame);
+		// Per-frame whole-process memory (committed/working-set/GC-heap bytes), aligned like
+		// get_frame_stats' size_points. Empty for captures made before this was added.
+		void get_memory_series(std::vector<uint64_t>& committed_points, std::vector<uint64_t>& working_set_points, std::vector<uint64_t>& gc_heap_points, uint64_t& max_committed, uint64_t from_frame, uint64_t to_frame);
 		// Returns a list of live objects for the specified timeframe
 		void get_live_objects(std::vector<live_object>& objects, int from, int to, progress_func_t progress_func);
 		// Returns a name for type ID
 		const char* get_type_name(uint64_t type_id) const;
-		// Returns callstack text for callstack ID
-		const char* get_callstack(uint64_t callstack_id) const;
+		// Returns callstack text for callstack ID (symbolicated if resolved). Returned by
+		// value because the text can be updated by the background symbolication thread.
+		std::string get_callstack(uint64_t callstack_id) const;
 		// Returns number of known types
 		size_t get_types_count() const;
 		// Returns number of known callstacks

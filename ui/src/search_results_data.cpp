@@ -127,7 +127,7 @@ QVariant search_results_callstacks_model::data(const QModelIndex& index, int rol
         return (qulonglong)m_rows[row].callstack;
 
     if (col == 0)
-        return m_data->get_callstack(m_rows[row].callstack);
+        return QString::fromStdString(m_data->get_callstack(m_rows[row].callstack));
 
     return QVariant();
 }
@@ -151,9 +151,9 @@ void search_results_callstacks_model::sort(int column, Qt::SortOrder order)
         comparer = [=](auto& r1, auto& r2) -> bool
         {
             if (order == Qt::AscendingOrder)
-                return strcmp(m_data->get_callstack(r1.callstack), m_data->get_callstack(r2.callstack)) < 0;
+                return m_data->get_callstack(r1.callstack) < m_data->get_callstack(r2.callstack);
             else
-                return strcmp(m_data->get_callstack(r1.callstack), m_data->get_callstack(r2.callstack)) > 0;
+                return m_data->get_callstack(r1.callstack) > m_data->get_callstack(r2.callstack);
         };
     }
     else

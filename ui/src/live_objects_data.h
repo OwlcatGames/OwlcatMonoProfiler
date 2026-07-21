@@ -19,7 +19,7 @@ public:
     void update(uint64_t from_frame, uint64_t to_frame, owlcat::progress_func_t progress_func);
 
     const char* get_type_name(uint64_t type_id) const { return m_data->get_type_name(type_id); }
-    const char* get_callstack(uint64_t callstack_id) const { return m_data->get_callstack(callstack_id); }
+    std::string get_callstack(uint64_t callstack_id) const { return m_data->get_callstack(callstack_id); }
 
     bool export_to_csv(const std::string& file);
 

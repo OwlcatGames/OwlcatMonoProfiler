@@ -25,6 +25,16 @@ namespace owlcat
 			// A definition is always sent before the first SRV_ALLOC that references it.
 			SRV_TYPE,
 			SRV_CALLSTACK,
+			// Definition of a single callstack frame ("Class.Method" or "Module.dll+0xRVA").
+			// Callstacks are sent as sequences of frame ids (SRV_CALLSTACK), and each frame
+			// id is defined once here before any callstack that references it. This collapses
+			// the huge redundancy of the ~90k unique frame lines shared across millions of
+			// callstacks (they would otherwise be re-sent as full text in every callstack).
+			SRV_FRAME,
+			// Per-frame whole-process memory snapshot (working set, committed bytes, managed
+			// GC heap). Lets the UI graph total committed memory against the tracked allocations
+			// - the gap is native allocator pool overhead the per-allocation view can't show.
+			SRV_MEMSTATS,
 		};
 
 		enum command
@@ -113,5 +123,9 @@ uint32_t id;
 		bool read_message(message& msg);
 
 		size_t get_read_messages_count() const;
+		// Bytes currently buffered on the send side (accumulated + in-flight). Grows without
+		// bound if the socket can't drain as fast as events are produced, so it's a key
+		// figure for diagnosing profiler memory use during an allocation storm.
+		size_t get_pending_write_bytes() const;
 	};
 }
