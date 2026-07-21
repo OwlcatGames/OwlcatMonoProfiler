@@ -1471,7 +1471,6 @@ public:
 		delete m_details;
 	}
 
-#if defined(WIN32)
 	mono_profiler_client::LaunchResult mono_profiler_client::launch_executable(const std::string& executable, const std::string& args, int port, const std::string& db_file_name, const std::string& dll_location, uint32_t capture_flags, const std::string& native_config)
 	{
 		return m_details->launch_executable(executable, args, port, db_file_name, dll_location, capture_flags, native_config);
