@@ -662,11 +662,13 @@ void main_window::onLiveObjectTypeSelected(const QItemSelection& selected, const
     //m_callstacks_worker->start();
 
     m_live_callstack_by_type_model.update(type_id, nullptr);
-    
+
     m_ui->callstacksList->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_ui->callstacksList->horizontalHeader()->resizeSection(1, 100);
     m_ui->callstacksList->horizontalHeader()->resizeSection(2, 100);
     m_ui->callstacksList->sortByColumn(2, Qt::SortOrder::DescendingOrder);
+
+    updateCallstacksFilteredSize();
 }
 
 void main_window::onSearchTypeSelected(const QItemSelection& selected, const QItemSelection& deselected)
@@ -801,6 +803,7 @@ void main_window::onTypeFilterChanged(QString filter)
 void main_window::onCallstackFilterChanged(QString filter)
 {
     m_live_callstack_by_type_filter_model.setFilterWildcard(filter);
+    updateCallstacksFilteredSize();
 }
 
 void main_window::onReferenceExpanded(QModelIndex index)
@@ -962,6 +965,7 @@ void main_window::calculateLiveObjects(int from_frame, int to_frame)
             m_live_objects_types_progress->setVisible(false);
 
             updateLiveObjectsSelectedSize();
+            updateCallstacksFilteredSize();
         }
     ));
 
@@ -974,10 +978,23 @@ void main_window::updateLiveObjectsSelectedSize()
     uint64_t selected_size = 0;
     for (auto& index : rows)
     {
-        selected_size += m_live_objects_by_type_model.data(index, live_objects_by_type_model::role::Size).toULongLong();
+        selected_size += m_live_object_by_type_filter_model.data(index, live_objects_by_type_model::role::Size).toULongLong();
     }
     QString text = QString("Selected %1 out of %2").arg(size_to_string(selected_size), size_to_string(m_live_objects_by_type_model.get_total_size()));
     m_ui->liveObjectsSizeLabel->setText(text);
+}
+
+void main_window::updateCallstacksFilteredSize()
+{
+    uint64_t filtered_size = 0;
+    int rows = m_live_callstack_by_type_filter_model.rowCount();
+    for (int i = 0; i < rows; ++i)
+    {
+        auto index = m_live_callstack_by_type_filter_model.index(i, 0);
+        filtered_size += m_live_callstack_by_type_filter_model.data(index, live_callstacks_by_type_model::role::Size).toULongLong();
+    }
+    QString text = QString("Filtered %1 out of %2").arg(size_to_string(filtered_size), size_to_string(m_live_callstack_by_type_model.get_total_size()));
+    m_ui->callstacksSizeLabel->setText(text);
 }
 
 bool main_window::trySaveUnsavedData()

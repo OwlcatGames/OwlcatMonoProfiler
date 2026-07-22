@@ -47,6 +47,7 @@ if (WIN32)
     add_subdirectory( test )
 endif()
 add_subdirectory( capture_check )
+add_subdirectory( owl_query )
 
 # ---------------- Packaging ----------------
 

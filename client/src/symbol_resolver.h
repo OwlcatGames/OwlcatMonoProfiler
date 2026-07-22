@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace owlcat
 {
@@ -29,6 +30,11 @@ namespace owlcat
 		// Returns the callstack text with its native frames symbolicated. If a module's
 		// symbols can't be found, its frames are left as "Module.dll+0xRVA".
 		std::string symbolicate(const std::string& raw);
+
+		// Modules referenced by symbolicated callstacks so far whose symbols could NOT
+		// be loaded from the current search path. Lets callers report exactly which
+		// PDBs are missing. Reset by set_search_path.
+		std::vector<std::string> get_unresolved_modules() const;
 
 	private:
 		struct impl;

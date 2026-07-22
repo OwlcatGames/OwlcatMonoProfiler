@@ -175,7 +175,7 @@ int live_callstacks_by_type_model::columnCount(const QModelIndex&) const
 
 QVariant live_callstacks_by_type_model::data(const QModelIndex& index, int role) const
 {
-    if (role != Qt::DisplayRole && role != role::Callstack)
+    if (role != Qt::DisplayRole && role != role::Callstack && role != role::Size)
         return QVariant();
 
     int row = index.row();
@@ -185,6 +185,8 @@ QVariant live_callstacks_by_type_model::data(const QModelIndex& index, int role)
 
     if (role == role::Callstack)
         return (qulonglong)m_rows[row].callstack;
+    if (role == role::Size)
+        return (qulonglong)m_rows[row].size;
 
     if (col == 0)
         return QString::fromStdString(m_data->get_callstack(m_rows[row].callstack));
@@ -269,6 +271,7 @@ void live_callstacks_by_type_model::update(uint64_t type, std::function<void(siz
     for (auto& t : iter->callstacks)
     {
         m_rows.push_back({ t.callstack, t.count, t.size, t.addresses });
+        m_total_size += t.size;
         if (callback != nullptr)
             callback(counter++, max);
     }
@@ -282,6 +285,8 @@ void live_callstacks_by_type_model::update(uint64_t type, std::function<void(siz
 
 void live_callstacks_by_type_model::clear()
 {
+    m_total_size = 0;
+
     if (m_rows.empty())
         return;
 

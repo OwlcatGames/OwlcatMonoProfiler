@@ -168,6 +168,13 @@
            </property>
           </widget>
          </item>
+         <item row="2" column="2">
+          <widget class="QLabel" name="callstacksSizeLabel">
+           <property name="text">
+            <string>Filtered 0Mb out of 0Mb</string>
+           </property>
+          </widget>
+         </item>
          <item row="1" column="0">
           <widget class="QTableView" name="liveObjectsList">
            <property name="palette">

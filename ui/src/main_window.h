@@ -102,6 +102,7 @@ private:
     void setZoom(float new_zoom);
     void calculateLiveObjects(int from_frame, int to_frame);
     void updateLiveObjectsSelectedSize();
+    void updateCallstacksFilteredSize();
     bool trySaveUnsavedData();
     void findObjectsReferences(const std::vector<uint64_t>& addresses);
     void export_types_to_csv();

@@ -108,6 +108,16 @@ namespace owlcat
 		// re-resolves all known callstacks.
 		void set_symbol_paths(const std::string& paths);
 
+		// Outstanding background symbolication work. 0 means every known callstack's
+		// text is final for the current symbol path - poll this after set_symbol_paths
+		// (or after opening a capture) before relying on symbolicated get_callstack output.
+		size_t get_symbolication_pending() const;
+
+		// Modules referenced by native callstack frames whose symbols could not be
+		// loaded from the current search path (i.e. missing PDBs). Meaningful once
+		// get_symbolication_pending returns 0.
+		std::vector<std::string> get_unresolved_symbol_modules();
+
 		// Returns an interface for querying profiling data
 		mono_profiler_client_data* get_data();
 

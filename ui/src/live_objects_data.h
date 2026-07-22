@@ -90,6 +90,7 @@ public:
     enum role
     {
         Callstack = Qt::UserRole + 0,
+        Size = Qt::UserRole + 1,
     };
 
 private:
@@ -103,6 +104,7 @@ private:
         std::vector<uint64_t> addresses;
     };
     std::vector<row_data> m_rows;
+    uint64_t m_total_size = 0;
 public:
     void init(live_objects_data* data);
 
@@ -115,6 +117,7 @@ public:
     void update(uint64_t type, std::function<void(size_t cur, size_t max)> callback);
     void clear();
 
+    uint64_t get_total_size() const { return m_total_size; }
     QModelIndex find_callstack(uint64_t callstack) const;
 
     const std::vector<uint64_t>* get_addresses(const QModelIndex& index);

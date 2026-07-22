@@ -23,9 +23,18 @@ namespace owlcat
 		bool initialized = false;
 		std::string search_path;
 
-		// module name -> synthetic load base, or 0 if its symbols couldn't be loaded
-		// (cached so a missing PDB isn't retried for every frame)
-		std::unordered_map<std::string, uint64_t> modules;
+		// Per referenced module: its synthetic load base (0 if registration failed),
+		// and whether actual symbols turned out to be available. With
+		// SYMOPT_DEFERRED_LOADS a missing PDB is NOT detected at SymLoadModuleEx -
+		// the load "succeeds" and the failure only surfaces at the first SymFromAddr,
+		// so has_symbols is determined there (checked flags that determination).
+		struct module_state
+		{
+			uint64_t base = 0;
+			bool checked = false;
+			bool has_symbols = false;
+		};
+		std::unordered_map<std::string, module_state> modules;
 		// Synthetic address space per module. We register each module with an explicit,
 		// generously-large span (rather than letting DbgHelp derive the size from the image,
 		// which we may not have) so that base+rva always lands inside the module's range.
@@ -35,8 +44,8 @@ namespace owlcat
 		static const uint64_t module_stride = 0x100000000ULL; // 4 GB
 		uint64_t next_base = module_stride;
 
-		// Loads (once) the symbols for a module and returns its synthetic base, or 0 on failure.
-		uint64_t get_module_base(const std::string& name)
+		// Loads (once) the symbols for a module and returns its state entry.
+		module_state& get_module(const std::string& name)
 		{
 			auto it = modules.find(name);
 			if (it != modules.end())
@@ -58,8 +67,15 @@ namespace owlcat
 			if (loaded == 0 && GetLastError() == ERROR_SUCCESS)
 				result = base;
 
-			modules[name] = result;
-			return result;
+			module_state state;
+			state.base = result;
+			if (result == 0)
+			{
+				// Registration itself failed - definitively no symbols
+				state.checked = true;
+				state.has_symbols = false;
+			}
+			return modules.emplace(name, state).first->second;
 		}
 
 		// Symbolicates a single callstack line. Returns it unchanged if it isn't a native
@@ -73,11 +89,11 @@ namespace owlcat
 			std::string module = line.substr(0, plus);
 			const uint64_t rva = strtoull(line.c_str() + plus + 3, nullptr, 16);
 
-			const uint64_t base = get_module_base(module);
-			if (base == 0)
+			module_state& state = get_module(module);
+			if (state.base == 0)
 				return line;
 
-			const DWORD64 addr = base + rva;
+			const DWORD64 addr = state.base + rva;
 
 			// SYMBOL_INFO needs room for the name after the struct; keep it 8-byte aligned.
 			ULONG64 storage[(sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(char)) / sizeof(ULONG64) + 1] = {};
@@ -86,7 +102,26 @@ namespace owlcat
 			sym->MaxNameLen = MAX_SYM_NAME;
 
 			DWORD64 sym_disp = 0;
-			if (!SymFromAddr(process, addr, &sym_disp, sym))
+			BOOL found = SymFromAddr(process, addr, &sym_disp, sym);
+
+			// First SymFromAddr triggers the deferred load; only now does DbgHelp
+			// know whether any symbols actually exist for this module
+			if (!state.checked)
+			{
+				state.checked = true;
+				if (found)
+				{
+					state.has_symbols = true;
+				}
+				else
+				{
+					IMAGEHLP_MODULE64 mi = {};
+					mi.SizeOfStruct = sizeof(mi);
+					state.has_symbols = SymGetModuleInfo64(process, addr, &mi) && mi.SymType != SymNone && mi.SymType != SymDeferred;
+				}
+			}
+
+			if (!found)
 				return line;
 
 			std::string out = module + "!" + sym->Name;
@@ -149,12 +184,21 @@ namespace owlcat
 			return;
 
 		for (auto& m : m_impl->modules)
-			if (m.second != 0)
-				SymUnloadModule64(m_impl->process, m.second);
+			if (m.second.base != 0)
+				SymUnloadModule64(m_impl->process, m.second.base);
 		m_impl->modules.clear();
 		m_impl->next_base = 0x100000000ULL;
 
 		SymSetSearchPath(m_impl->process, path.empty() ? nullptr : path.c_str());
+	}
+
+	std::vector<std::string> symbol_resolver::get_unresolved_modules() const
+	{
+		std::vector<std::string> result;
+		for (auto& m : m_impl->modules)
+			if (m.second.checked && !m.second.has_symbols)
+				result.push_back(m.first);
+		return result;
 	}
 
 	std::string symbol_resolver::symbolicate(const std::string& raw)
@@ -188,6 +232,7 @@ namespace owlcat
 	symbol_resolver::~symbol_resolver() {}
 	void symbol_resolver::set_search_path(const std::string&) {}
 	std::string symbol_resolver::symbolicate(const std::string& raw) { return raw; }
+	std::vector<std::string> symbol_resolver::get_unresolved_modules() const { return {}; }
 
 #endif
 }

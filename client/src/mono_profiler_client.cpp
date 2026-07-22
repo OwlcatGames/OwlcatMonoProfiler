@@ -26,6 +26,10 @@
 #if defined(WIN32)
 #include <Windows.h>
 #include "detours.h"
+#include <io.h>
+#include <fcntl.h>
+#include <share.h>
+#include <sys/stat.h>
 #endif
 
 namespace owlcat
@@ -259,8 +263,22 @@ namespace owlcat
 		std::vector<std::string> m_extracted_files;
 		std::string m_extract_dir;
 
+		// Handle of the exclusive "lock" file held open inside m_extract_dir for
+		// the lifetime of an opened capture. sweep_stale_extractions of other
+		// instances probes this file to tell a live extraction from a stale one.
+#if defined(WIN32)
+		int m_extract_lock_fd = -1;
+#endif
+
 		void cleanup_extracted_files()
 		{
+#if defined(WIN32)
+			if (m_extract_lock_fd != -1)
+			{
+				_close(m_extract_lock_fd);
+				m_extract_lock_fd = -1;
+			}
+#endif
 			std::error_code ec;
 			for (auto& file : m_extracted_files)
 				std::filesystem::remove(file, ec);
@@ -268,9 +286,86 @@ namespace owlcat
 
 			if (!m_extract_dir.empty())
 			{
-				std::filesystem::remove(m_extract_dir, ec);
+				// Deleting the extracted files can fail transiently: antivirus or the
+				// search indexer may briefly hold a freshly-written multi-GB file
+				// without FILE_SHARE_DELETE, and one failed deletion orphans the whole
+				// directory in %TEMP% forever. Retry with remove_all for a few seconds.
+				for (int attempt = 0; attempt < 15; ++attempt)
+				{
+					std::filesystem::remove_all(m_extract_dir, ec);
+					if (!std::filesystem::exists(m_extract_dir, ec))
+						break;
+					std::this_thread::sleep_for(std::chrono::milliseconds(200));
+				}
 				m_extract_dir.clear();
 			}
+		}
+
+		/*
+			Deletes stale capture extractions left under %TEMP%\OwlcatMonoProfiler by
+			crashed or killed sessions (or by cleanup_extracted_files failing at close).
+			These are multi-gigabyte copies of opened .owl files, and nothing else ever
+			removes them.
+
+			Safe against concurrent instances (several UIs / owl_query servers can run
+			at once):
+			- a live session holds an exclusive "lock" file in its directory (created
+			  in open_data before unpacking); if that file cannot be opened exclusively,
+			  the directory is in use and is skipped;
+			- directories without a lock file (older versions, or killed before locking)
+			  are only removed if untouched for 24 hours AND no file in them is open
+			  anywhere (SQLite holds the database open for the whole session). Deleting
+			  a live no-lock extraction would break that session, so err on keeping.
+		*/
+		void sweep_stale_extractions()
+		{
+#if defined(WIN32)
+			std::error_code ec;
+			auto temp_root = std::filesystem::temp_directory_path(ec) / "OwlcatMonoProfiler";
+			if (ec)
+				return;
+
+			auto exclusively_openable = [](const std::filesystem::path& path)
+			{
+				int fd = -1;
+				if (_sopen_s(&fd, path.string().c_str(), _O_RDONLY, _SH_DENYRW, 0) != 0)
+					return false;
+				_close(fd);
+				return true;
+			};
+
+			for (auto& entry : std::filesystem::directory_iterator(temp_root, ec))
+			{
+				std::error_code entry_ec;
+				if (!entry.is_directory(entry_ec))
+					continue;
+				if (entry.path().filename().string().rfind("capture_", 0) != 0)
+					continue;
+
+				auto lock_path = entry.path() / "lock";
+				bool stale;
+				if (std::filesystem::exists(lock_path, entry_ec))
+				{
+					stale = exclusively_openable(lock_path);
+				}
+				else
+				{
+					auto now = std::filesystem::file_time_type::clock::now();
+					auto dir_age = now - std::filesystem::last_write_time(entry.path(), entry_ec);
+					stale = !entry_ec && dir_age > std::chrono::hours(24);
+					for (auto& file : std::filesystem::directory_iterator(entry.path(), entry_ec))
+					{
+						if (!stale)
+							break;
+						if (!exclusively_openable(file.path()))
+							stale = false;
+					}
+				}
+
+				if (stale)
+					std::filesystem::remove_all(entry.path(), entry_ec);
+			}
+#endif
 		}
 
 		bool m_has_min_frame = false;
@@ -310,6 +405,17 @@ namespace owlcat
 		// read (copied) by the UI thread; guarded by m_display_mutex.
 		std::unordered_map<uint64_t, std::string> m_id_to_display_callstack;
 		std::mutex m_display_mutex;
+		// Outstanding symbolication work: queued items plus, during a path change,
+		// the re-resolve backlog. Zero means every known callstack's display text is
+		// final for the current symbol path - programmatic consumers (owl_query) poll
+		// this to know when symbolicated output is stable.
+		std::atomic<size_t> m_symbol_pending{ 0 };
+		// True from set_symbol_paths until the symbol thread has finished re-resolving
+		// under the new path (covers the window before the thread even wakes up)
+		std::atomic<bool> m_symbol_repath_active{ false };
+		// Snapshot of symbol_resolver::get_unresolved_modules, updated by the symbol
+		// thread; guarded by m_display_mutex
+		std::vector<std::string> m_unresolved_modules;
 
 		// Queues a callstack for background symbolication
 		void queue_for_symbolication(uint64_t callstack_id, const std::string& raw)
@@ -320,6 +426,7 @@ namespace owlcat
 
 			std::scoped_lock lock(m_symbol_mutex);
 			m_symbol_queue.push_back({ callstack_id, raw });
+			++m_symbol_pending;
 			m_symbol_cv.notify_one();
 		}
 
@@ -375,6 +482,7 @@ namespace owlcat
 						std::scoped_lock lock(m_display_mutex);
 						m_id_to_display_callstack.clear();
 					}
+					m_symbol_pending += known.size();
 					for (auto& k : known)
 					{
 						std::string display = m_symbol_resolver->symbolicate(k.second);
@@ -383,6 +491,15 @@ namespace owlcat
 							std::scoped_lock lock(m_display_mutex);
 							m_id_to_display_callstack[k.first] = std::move(display);
 						}
+						--m_symbol_pending;
+					}
+					update_unresolved_modules();
+					{
+						// Only drop the repath flag if no newer path change is already
+						// queued, so pending never reads 0 between two changes
+						std::scoped_lock lock(m_symbol_mutex);
+						if (!m_symbol_path_changed)
+							m_symbol_repath_active = false;
 					}
 					continue;
 				}
@@ -396,7 +513,17 @@ namespace owlcat
 					std::scoped_lock lock(m_display_mutex);
 					m_id_to_display_callstack[item.first] = std::move(display);
 				}
+				update_unresolved_modules();
+				--m_symbol_pending;
 			}
+		}
+
+		// Publishes the resolver's unresolved-module list (symbol thread only)
+		void update_unresolved_modules()
+		{
+			auto unresolved = m_symbol_resolver->get_unresolved_modules();
+			std::scoped_lock lock(m_display_mutex);
+			m_unresolved_modules = std::move(unresolved);
 		}
 
 		uint64_t m_next_type_id = 0;
@@ -824,6 +951,8 @@ namespace owlcat
 	public:
 		details()
 		{
+			sweep_stale_extractions();
+
 			m_data_interface.reset(new mono_profiler_client_data(this));
 
 			m_symbol_resolver = std::make_unique<symbol_resolver>();
@@ -854,6 +983,9 @@ namespace owlcat
 			std::scoped_lock lock(m_symbol_mutex);
 			m_pending_symbol_path = path;
 			m_symbol_path_changed = true;
+			// Counts as outstanding work right away: the re-resolve backlog is only
+			// known on the symbol thread, but pollers must not see 0 before it wakes
+			m_symbol_repath_active = true;
 			m_symbol_cv.notify_one();
 		}
 
@@ -861,9 +993,23 @@ namespace owlcat
 		void reset_symbolication()
 		{
 			std::scoped_lock lock(m_symbol_mutex);
+			m_symbol_pending -= m_symbol_queue.size();
 			m_symbol_queue.clear();
 			m_symbol_reset = true;
 			m_symbol_cv.notify_one();
+		}
+
+		// Outstanding symbolication work; 0 = all display text is final for the
+		// current symbol path
+		size_t get_symbolication_pending() const
+		{
+			return m_symbol_pending + (m_symbol_repath_active ? 1 : 0);
+		}
+
+		std::vector<std::string> get_unresolved_symbol_modules()
+		{
+			std::scoped_lock lock(m_display_mutex);
+			return m_unresolved_modules;
 		}
 
 #if defined(WIN32)
@@ -1117,6 +1263,13 @@ namespace owlcat
 			std::filesystem::create_directories(extract_dir, ec);
 			if (ec)
 				return false;
+
+#if defined(WIN32)
+			// Mark the directory as in use BEFORE unpacking: an exclusive lock file,
+			// held open until cleanup_extracted_files, that sweep_stale_extractions
+			// of other instances probes to avoid deleting a live extraction
+			_sopen_s(&m_extract_lock_fd, (extract_dir / "lock").string().c_str(), _O_CREAT | _O_RDWR, _SH_DENYRW, _S_IREAD | _S_IWRITE);
+#endif
 
 			std::map<std::string, std::string> extracted;
 			if (!capture_container::unpack(file, extract_dir.string(), extracted))
@@ -1541,6 +1694,16 @@ public:
 	void mono_profiler_client::set_symbol_paths(const std::string& paths)
 	{
 		m_details->set_symbol_paths(paths);
+	}
+
+	size_t mono_profiler_client::get_symbolication_pending() const
+	{
+		return m_details->get_symbolication_pending();
+	}
+
+	std::vector<std::string> mono_profiler_client::get_unresolved_symbol_modules()
+	{
+		return m_details->get_unresolved_symbol_modules();
 	}
 
 	void mono_profiler_client::find_objects_references(const std::vector<uint64_t>& addresses, find_references_callback callback)
