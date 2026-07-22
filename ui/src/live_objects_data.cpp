@@ -1,6 +1,8 @@
 #include "live_objects_data.h"
 #include "common_ui.h"
 
+#include <algorithm>
+
 bool live_objects_data::export_to_csv(const std::string& file)
 {
     FILE* f = fopen(file.c_str(), "w");
@@ -175,7 +177,7 @@ int live_callstacks_by_type_model::columnCount(const QModelIndex&) const
 
 QVariant live_callstacks_by_type_model::data(const QModelIndex& index, int role) const
 {
-    if (role != Qt::DisplayRole && role != role::Callstack && role != role::Size)
+    if (role != Qt::DisplayRole && role != role::Callstack && role != role::Size && role != role::Lines)
         return QVariant();
 
     int row = index.row();
@@ -187,6 +189,8 @@ QVariant live_callstacks_by_type_model::data(const QModelIndex& index, int role)
         return (qulonglong)m_rows[row].callstack;
     if (role == role::Size)
         return (qulonglong)m_rows[row].size;
+    if (role == role::Lines)
+        return m_rows[row].lines;
 
     if (col == 0)
         return QString::fromStdString(m_data->get_callstack(m_rows[row].callstack));
@@ -252,7 +256,7 @@ void live_callstacks_by_type_model::sort(int column, Qt::SortOrder order)
     emit dataChanged(QModelIndex(), QModelIndex());
 }
 
-void live_callstacks_by_type_model::update(uint64_t type, std::function<void(size_t cur, size_t max)> callback)
+void live_callstacks_by_type_model::update(uint64_t type, owlcat::progress_func_t callback)
 {
     clear();
 
@@ -265,22 +269,31 @@ void live_callstacks_by_type_model::update(uint64_t type, std::function<void(siz
 
     size_t max = iter->callstacks.size();
 
-    beginInsertRows(QModelIndex(), 0, (int)iter->callstacks.size() - 1);
-
+    // Build the rows before announcing the insert: fetching each callstack's
+    // text to cache its line count is the measurable part of the work, and the
+    // progress callback may pump the event loop, which must not happen while
+    // an insert is in progress.
+    std::vector<row_data> rows;
+    rows.reserve(max);
+    uint64_t total_size = 0;
     size_t counter = 0;
     for (auto& t : iter->callstacks)
     {
-        m_rows.push_back({ t.callstack, t.count, t.size, t.addresses });
-        m_total_size += t.size;
-        if (callback != nullptr)
-            callback(counter++, max);
+        std::string text = m_data->get_callstack(t.callstack);
+        int lines = 1 + (int)std::count(text.begin(), text.end(), '\n');
+        rows.push_back({ t.callstack, t.count, t.size, t.addresses, lines });
+        total_size += t.size;
+        if (callback != nullptr && !callback(counter++, max))
+            return;
     }
 
+    // Pre-sort into the default view order so no re-layout follows the insert
+    std::sort(rows.begin(), rows.end(), [](const row_data& a, const row_data& b) { return a.size > b.size; });
+
+    beginInsertRows(QModelIndex(), 0, (int)rows.size() - 1);
+    m_rows = std::move(rows);
+    m_total_size = total_size;
     endInsertRows();
-
-    sort(2, Qt::DescendingOrder);
-
-    emit dataChanged(QModelIndex(), QModelIndex());
 }
 
 void live_callstacks_by_type_model::clear()

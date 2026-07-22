@@ -1,6 +1,8 @@
 #include "search_results_data.h"
 #include "common_ui.h"
 
+#include <algorithm>
+
 void search_results_types_model::init(search_results_data* data)
 {
     m_data = data;
@@ -115,7 +117,7 @@ int search_results_callstacks_model::columnCount(const QModelIndex&) const
 
 QVariant search_results_callstacks_model::data(const QModelIndex& index, int role) const
 {
-    if (role != Qt::DisplayRole && role != role::Callstack)
+    if (role != Qt::DisplayRole && role != role::Callstack && role != role::Lines)
         return QVariant();
 
     int row = index.row();
@@ -125,6 +127,8 @@ QVariant search_results_callstacks_model::data(const QModelIndex& index, int rol
 
     if (role == role::Callstack)
         return (qulonglong)m_rows[row].callstack;
+    if (role == role::Lines)
+        return m_rows[row].lines;
 
     if (col == 0)
         return QString::fromStdString(m_data->get_callstack(m_rows[row].callstack));
@@ -164,7 +168,7 @@ void search_results_callstacks_model::sort(int column, Qt::SortOrder order)
     emit dataChanged(QModelIndex(), QModelIndex());
 }
 
-void search_results_callstacks_model::update(uint64_t type, std::function<void(size_t cur, size_t max)> callback)
+void search_results_callstacks_model::update(uint64_t type, owlcat::progress_func_t callback)
 {
     clear();
 
@@ -177,21 +181,25 @@ void search_results_callstacks_model::update(uint64_t type, std::function<void(s
 
     size_t max = iter->callstacks.size();
 
-    beginInsertRows(QModelIndex(), 0, (int)iter->callstacks.size() - 1);
-
+    // Build the rows before announcing the insert: fetching each callstack's
+    // text to cache its line count is the measurable part of the work, and the
+    // progress callback may pump the event loop, which must not happen while
+    // an insert is in progress.
+    std::vector<row_data> rows;
+    rows.reserve(max);
     size_t counter = 0;
     for (auto& t : iter->callstacks)
     {
-        m_rows.push_back({ t.callstack });
-        if (callback != nullptr)
-            callback(counter++, max);
+        std::string text = m_data->get_callstack(t.callstack);
+        int lines = 1 + (int)std::count(text.begin(), text.end(), '\n');
+        rows.push_back({ t.callstack, {}, lines });
+        if (callback != nullptr && !callback(counter++, max))
+            return;
     }
 
+    beginInsertRows(QModelIndex(), 0, (int)rows.size() - 1);
+    m_rows = std::move(rows);
     endInsertRows();
-
-    sort(2, Qt::DescendingOrder);
-
-    emit dataChanged(QModelIndex(), QModelIndex());
 }
 
 void search_results_callstacks_model::clear()

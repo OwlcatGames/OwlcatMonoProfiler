@@ -5,8 +5,10 @@
 #include <qevent.h>
 #include <qprogressbar.h>
 #include <qboxlayout.h>
+#include <qtableview.h>
 #include <qthread.h>
 #include <qelapsedtimer.h>
+#include <qtimer.h>
 #include "qwt_plot_histogram.h"
 #include "qwt_plot_curve.h"
 #include "qwt_plot_zoneitem.h"
@@ -69,8 +71,6 @@ public:
 signals:
     void onLiveObjectTypesProgressInitiated(int min, int max);
     void onLiveObjectTypesProgressChanged(int value);
-    void onLiveObjectCallstacksProgressInitiated(int min, int max);
-    void onLiveObjectCallstacksProgressChanged(int value);
     void onObjectReferencesFound(std::string error, std::vector<uint64_t> addresses, std::vector<owlcat::object_references_t> result);
 
 public slots:
@@ -96,6 +96,27 @@ public slots:
     void onReferenceExpanded(QModelIndex index);
 
 private:
+    /*
+        Per-callstacks-table state for populating rows and applying row heights
+        on the GUI thread in chunks, with a progress bar and event pumping in
+        between (the work cannot move to a thread: row heights and model
+        population belong to the GUI thread). `generation` implements
+        cancellation: any newer populate/heights pass, or a live-objects
+        recalculation, bumps it, and older passes notice and abort at their
+        next chunk boundary.
+    */
+    struct callstacks_view_state
+    {
+        QTableView* view = nullptr;
+        QProgressBar* bar = nullptr;
+        uint64_t generation = 0;
+        bool heights_scheduled = false;
+        bool populating = false;
+        // Non-zero while applyRowHeights is looping (a counter, since passes
+        // pump events and can nest); filter application is deferred while set
+        int heights_running = 0;
+    };
+
     bool eventFilter(QObject* object, QEvent* event) override;
     void timerEvent(QTimerEvent* ev) override;
     void closeEvent(QCloseEvent* ev) override;
@@ -106,7 +127,12 @@ private:
     bool trySaveUnsavedData();
     void findObjectsReferences(const std::vector<uint64_t>& addresses);
     void export_types_to_csv();
-    
+    // Sets every row's height from the model's Lines role (chunked, pumps
+    // events, drives s.bar when manage_bar). Returns false if cancelled.
+    bool applyRowHeights(callstacks_view_state& s, uint64_t generation, int progress_offset, bool manage_bar);
+    // Coalesces height re-application (sort/filter changes) into one deferred pass
+    void scheduleRowHeights(callstacks_view_state& s);
+
     Ui::MainWindow* m_ui;
 
     QwtPlotHistogram m_allocations_chart;
@@ -124,6 +150,16 @@ private:
     QScopedPointer<QProgressBar> m_live_objects_types_progress;
     QScopedPointer<QHBoxLayout> m_live_objects_callstacks_progress_layout;
     QScopedPointer<QProgressBar> m_live_objects_callstacks_progress;
+    QScopedPointer<QHBoxLayout> m_search_callstacks_progress_layout;
+    QScopedPointer<QProgressBar> m_search_callstacks_progress;
+
+    callstacks_view_state m_live_callstacks_view;
+    callstacks_view_state m_search_callstacks_view;
+
+    // Debounce for the callstack filter box: refiltering the proxy is expensive
+    // (it queries every source row's text), so apply only after typing pauses
+    QTimer m_callstack_filter_timer;
+    QString m_pending_callstack_filter;
 
     live_objects_data m_live_objects_data;
     live_objects_by_type_model m_live_objects_by_type_model;
@@ -142,7 +178,6 @@ private:
     std::shared_ptr<graphs_data> m_data;
 
     QScopedPointer<QThread> m_types_worker;
-    QScopedPointer<QThread> m_callstacks_worker;
 
     QScopedPointer<QMenu> m_callstacksMenu;
     QScopedPointer<QMenu> m_referencesMenu;

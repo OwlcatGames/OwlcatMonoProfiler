@@ -18,6 +18,13 @@
 #include <qmessagebox.h>
 #include <qfiledialog.h>
 #include <qcheckbox.h>
+#include <qtimer.h>
+
+// Callstacks-table population/row-height passes: rows per event-loop pump, and
+// the row count above which the progress bar is shown (below it the pass is
+// quick enough that the bar would only flash)
+static const size_t kCallstacksChunk = 2048;
+static const size_t kCallstacksProgressThreshold = 2000;
 
 class ui_data_allocations : public QwtSeriesData<QwtIntervalSample>
 {
@@ -197,10 +204,39 @@ main_window::main_window(QWidget* parent) :
     m_live_objects_callstacks_progress_layout->addSpacing(100);
     m_live_objects_callstacks_progress->setVisible(false);
 
+    m_search_callstacks_progress.reset(new QProgressBar());
+    m_search_callstacks_progress->setAlignment(Qt::AlignCenter);
+    m_search_callstacks_progress_layout.reset(new QHBoxLayout(m_ui->searchCallstacksList));
+    m_search_callstacks_progress_layout->addSpacing(100);
+    m_search_callstacks_progress_layout->addWidget(m_search_callstacks_progress.data());
+    m_search_callstacks_progress_layout->addSpacing(100);
+    m_search_callstacks_progress->setVisible(false);
+
+    m_live_callstacks_view.view = m_ui->callstacksList;
+    m_live_callstacks_view.bar = m_live_objects_callstacks_progress.data();
+    m_search_callstacks_view.view = m_ui->searchCallstacksList;
+    m_search_callstacks_view.bar = m_search_callstacks_progress.data();
+
+    // Apply the callstack filter only after the user stops typing: each
+    // application refilters the whole proxy synchronously. If a populate or
+    // heights pass is mid-flight (they pump events, so the timer can fire
+    // inside one), retry later instead of changing rows under the pass.
+    m_callstack_filter_timer.setSingleShot(true);
+    m_callstack_filter_timer.setInterval(300);
+    connect(&m_callstack_filter_timer, &QTimer::timeout, this, [this]()
+        {
+            auto& s = m_live_callstacks_view;
+            if (s.populating || s.heights_running)
+            {
+                m_callstack_filter_timer.start();
+                return;
+            }
+            m_live_callstack_by_type_filter_model.setFilterWildcard(m_pending_callstack_filter);
+            updateCallstacksFilteredSize();
+        });
+
     connect(this, SIGNAL(onLiveObjectTypesProgressChanged(int)), m_live_objects_types_progress.data(), SLOT(setValue(int)), Qt::ConnectionType::QueuedConnection);
     connect(this, SIGNAL(onLiveObjectTypesProgressInitiated(int, int)), m_live_objects_types_progress.data(), SLOT(setRange(int, int)), Qt::ConnectionType::QueuedConnection);
-    connect(this, SIGNAL(onLiveObjectCallstacksProgressChanged(int)), m_live_objects_callstacks_progress.data(), SLOT(setValue(int)), Qt::ConnectionType::QueuedConnection);
-    connect(this, SIGNAL(onLiveObjectCallstacksProgressInitiated(int, int)), m_live_objects_callstacks_progress.data(), SLOT(setRange(int, int)), Qt::ConnectionType::QueuedConnection);
 
     // --------- Pickers ---------
 
@@ -297,8 +333,18 @@ main_window::main_window(QWidget* parent) :
     m_live_callstack_by_type_filter_model.setFilterCaseSensitivity(Qt::CaseInsensitive);
     m_ui->callstacksList->setModel(&m_live_callstack_by_type_filter_model);
 
-    m_ui->callstacksList->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    // Row heights are set explicitly from cached line counts (see applyRowHeights):
+    // ResizeToContents would synchronously lay out every row's multi-line text on
+    // the GUI thread on every insert/sort/filter pass
+    m_ui->callstacksList->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     connect(m_ui->liveObjectsList->selectionModel(), SIGNAL(selectionChanged(QItemSelection, QItemSelection)), this, SLOT(onLiveObjectTypeSelected(QItemSelection, QItemSelection)));
+
+    // Re-apply row heights whenever the proxy rearranges rows (header-click sort,
+    // filter changes); populate paths apply heights themselves (see `populating`)
+    auto reapply_live_heights = [this]() { scheduleRowHeights(m_live_callstacks_view); };
+    connect(&m_live_callstack_by_type_filter_model, &QAbstractItemModel::layoutChanged, this, reapply_live_heights);
+    connect(&m_live_callstack_by_type_filter_model, &QAbstractItemModel::rowsInserted, this, reapply_live_heights);
+    connect(&m_live_callstack_by_type_filter_model, &QAbstractItemModel::rowsRemoved, this, reapply_live_heights);
 
     // --------- Object references tab ---------
 
@@ -317,8 +363,13 @@ main_window::main_window(QWidget* parent) :
     m_search_results_callstacks_filter_model.setFilterCaseSensitivity(Qt::CaseInsensitive);
     m_ui->searchCallstacksList->setModel(&m_search_results_callstacks_filter_model);
 
-    m_ui->searchCallstacksList->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_ui->searchCallstacksList->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     connect(m_ui->searchTypesList->selectionModel(), SIGNAL(selectionChanged(QItemSelection, QItemSelection)), this, SLOT(onSearchTypeSelected(QItemSelection, QItemSelection)));
+
+    auto reapply_search_heights = [this]() { scheduleRowHeights(m_search_callstacks_view); };
+    connect(&m_search_results_callstacks_filter_model, &QAbstractItemModel::layoutChanged, this, reapply_search_heights);
+    connect(&m_search_results_callstacks_filter_model, &QAbstractItemModel::rowsInserted, this, reapply_search_heights);
+    connect(&m_search_results_callstacks_filter_model, &QAbstractItemModel::rowsRemoved, this, reapply_search_heights);
 
     // --------- ---------
     
@@ -620,53 +671,58 @@ void main_window::onLiveObjectTypeSelected(const QItemSelection& selected, const
 
     updateLiveObjectsSelectedSize();
 
-    // TODO: Make update of list of callstack asynchronous somehow? But we can't do it easilty, because the slowdown is in calculating the height of list items, which is pefrormed
-    // in one frame on main thread only.
+    // Populating the table and applying row heights both belong to the GUI
+    // thread, so the work is chunked and the event loop is pumped in between:
+    // the progress bar paints, and the user can still change the selection -
+    // which re-enters this handler and cancels the older pass via `generation`.
+    // A cancelled pass returns without restoring the UI: the newer pass that
+    // cancelled it has already done so itself.
+    auto& s = m_live_callstacks_view;
+    const uint64_t generation = ++s.generation;
+    auto cancelled = [&s, generation] { return s.generation != generation; };
 
-    //m_ui->callstacksList->setEnabled(false);
-    //m_live_objects_callstacks_progress->setVisible(true);
+    s.populating = true;
+    m_ui->callstacksList->setEnabled(false);
 
-    //m_callstacks_worker.reset(new ui_thread(
-    //    this,
-    //    [this, type_id]()
-    //    {
-    //        bool first_time = true;
-    //        size_t cnt = 0;
+    size_t total = 0;
+    bool bar_shown = false;
+    m_live_callstack_by_type_model.update(type_id, [&](size_t cur, size_t max)
+        {
+            if (cancelled())
+                return false;
+            if (cur == 0 && max > kCallstacksProgressThreshold)
+            {
+                total = max;
+                // First half of the range: building rows; second half: row heights
+                s.bar->setRange(0, (int)(2 * max));
+                s.bar->setValue(0);
+                s.bar->setVisible(true);
+                bar_shown = true;
+            }
+            if (bar_shown && (cur + 1) % kCallstacksChunk == 0)
+            {
+                s.bar->setValue((int)cur);
+                QCoreApplication::processEvents();
+                if (cancelled())
+                    return false;
+            }
+            return true;
+        });
 
-    //        m_live_callstack_by_type_model.update(type_id, [&](size_t cur, size_t max)
-    //            {
-    //                if (first_time)
-    //                {
-    //                    first_time = false;
-    //                    emit onLiveObjectCallstacksProgressInitiated(0, max);
-    //                }
-    //                if (cur / 10 > cnt)
-    //                {
-    //                    cnt = cur / 10;
-    //                    emit onLiveObjectCallstacksProgressChanged(cur);
-    //                }
-    //            });
-    //    },
-    //    [this]()
-    //    {
-    //        m_ui->callstacksList->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-    //        m_ui->callstacksList->horizontalHeader()->resizeSection(1, 100);
-    //        m_ui->callstacksList->horizontalHeader()->resizeSection(2, 100);
-    //        m_ui->callstacksList->sortByColumn(2, Qt::SortOrder::DescendingOrder);                      
-
-    //        m_ui->callstacksList->setEnabled(true);
-    //        m_live_objects_callstacks_progress->setVisible(false);            
-    //    }
-    //    ));
-
-    //m_callstacks_worker->start();
-
-    m_live_callstack_by_type_model.update(type_id, nullptr);
+    if (cancelled())
+        return;
 
     m_ui->callstacksList->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_ui->callstacksList->horizontalHeader()->resizeSection(1, 100);
     m_ui->callstacksList->horizontalHeader()->resizeSection(2, 100);
     m_ui->callstacksList->sortByColumn(2, Qt::SortOrder::DescendingOrder);
+
+    if (!applyRowHeights(s, generation, (int)total, false))
+        return;
+
+    s.populating = false;
+    s.bar->setVisible(false);
+    m_ui->callstacksList->setEnabled(true);
 
     updateCallstacksFilteredSize();
 }
@@ -679,12 +735,52 @@ void main_window::onSearchTypeSelected(const QItemSelection& selected, const QIt
 
     uint64_t type_id = m_search_results_types_filter_model.data(currentIndex, Qt::UserRole).toInt();
 
-    m_search_results_callstacks_model.update(type_id, nullptr);
+    // Same chunked populate + row heights as onLiveObjectTypeSelected
+    auto& s = m_search_callstacks_view;
+    const uint64_t generation = ++s.generation;
+    auto cancelled = [&s, generation] { return s.generation != generation; };
+
+    s.populating = true;
+    m_ui->searchCallstacksList->setEnabled(false);
+
+    size_t total = 0;
+    bool bar_shown = false;
+    m_search_results_callstacks_model.update(type_id, [&](size_t cur, size_t max)
+        {
+            if (cancelled())
+                return false;
+            if (cur == 0 && max > kCallstacksProgressThreshold)
+            {
+                total = max;
+                s.bar->setRange(0, (int)(2 * max));
+                s.bar->setValue(0);
+                s.bar->setVisible(true);
+                bar_shown = true;
+            }
+            if (bar_shown && (cur + 1) % kCallstacksChunk == 0)
+            {
+                s.bar->setValue((int)cur);
+                QCoreApplication::processEvents();
+                if (cancelled())
+                    return false;
+            }
+            return true;
+        });
+
+    if (cancelled())
+        return;
 
     m_ui->searchCallstacksList->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_ui->searchCallstacksList->horizontalHeader()->resizeSection(1, 100);
     m_ui->searchCallstacksList->horizontalHeader()->resizeSection(2, 100);
     m_ui->searchCallstacksList->sortByColumn(2, Qt::SortOrder::DescendingOrder);
+
+    if (!applyRowHeights(s, generation, (int)total, false))
+        return;
+
+    s.populating = false;
+    s.bar->setVisible(false);
+    m_ui->searchCallstacksList->setEnabled(true);
 }
 
 void main_window::onPickerChanged(const QPolygon& selection)
@@ -774,6 +870,13 @@ void main_window::onReferencesMenuAction(bool state)
     if (currentIndex == QModelIndex())
         return;
 
+    // Cancel any in-flight search-callstacks population/height pass (this can
+    // be reached from their processEvents pumping): search_address_list
+    // rebuilds m_search_results_data, which such a pass iterates
+    ++m_search_callstacks_view.generation;
+    m_search_callstacks_view.populating = false;
+    m_search_callstacks_view.bar->setVisible(false);
+
     auto addresses = m_object_references_tree_model.get_addresses(currentIndex);
     m_search_results_data.search_address_list(addresses, nullptr);
     m_ui->tabWidget->setCurrentIndex(2);
@@ -802,8 +905,8 @@ void main_window::onTypeFilterChanged(QString filter)
 
 void main_window::onCallstackFilterChanged(QString filter)
 {
-    m_live_callstack_by_type_filter_model.setFilterWildcard(filter);
-    updateCallstacksFilteredSize();
+    m_pending_callstack_filter = filter;
+    m_callstack_filter_timer.start();
 }
 
 void main_window::onReferenceExpanded(QModelIndex index)
@@ -913,6 +1016,13 @@ void main_window::setZoom(float new_zoom)
 
 void main_window::calculateLiveObjects(int from_frame, int to_frame)
 {
+    // Cancel any in-flight callstacks population/height pass (this can be
+    // reached from their processEvents pumping): the worker below rebuilds
+    // m_live_objects_data, which a populate pass iterates
+    ++m_live_callstacks_view.generation;
+    m_live_callstacks_view.populating = false;
+    m_live_callstacks_view.bar->setVisible(false);
+
     if (m_types_worker != nullptr && m_types_worker->isRunning())
     {
         m_types_worker->requestInterruption();
@@ -970,6 +1080,101 @@ void main_window::calculateLiveObjects(int from_frame, int to_frame)
     ));
 
     m_types_worker->start();
+}
+
+/*
+    Sets every row's height from the model's cached line count (role::Lines),
+    in chunks, pumping the event loop in between so the progress bar paints and
+    the pass can be cancelled. This replaces QHeaderView::ResizeToContents,
+    which laid out every row's full multi-line text on the GUI thread on every
+    insert/sort/filter pass.
+
+    progress_offset shifts the bar values when the caller shares the bar with a
+    preceding populate phase; manage_bar makes this pass own the bar's
+    range/visibility (standalone re-application after sort/filter changes).
+
+    Returns false if cancelled (s.generation moved on from inside processEvents).
+*/
+bool main_window::applyRowHeights(callstacks_view_state& s, uint64_t generation, int progress_offset, bool manage_bar)
+{
+    QAbstractItemModel* model = s.view->model();
+    QHeaderView* header = s.view->verticalHeader();
+
+    const int rows = model->rowCount();
+    if (rows == 0)
+        return true;
+
+    // Calibrate against the delegate's real hint for one row, so heights match
+    // what ResizeToContents used to produce
+    const int line_spacing = s.view->fontMetrics().lineSpacing();
+    const int first_lines = std::max(1, model->index(0, 0).data(live_callstacks_by_type_model::role::Lines).toInt());
+    // sizeHintForRow is public on QAbstractItemView but re-declared protected
+    // by QTableView; access is checked against the static type, so go via the base
+    const int first_hint = static_cast<QAbstractItemView*>(s.view)->sizeHintForRow(0);
+    const int padding = first_hint > 0 ? std::max(0, first_hint - first_lines * line_spacing) : 4;
+
+    const bool show_bar = manage_bar && rows > (int)kCallstacksProgressThreshold;
+    if (show_bar)
+    {
+        s.bar->setRange(0, rows);
+        s.bar->setValue(0);
+        s.bar->setVisible(true);
+    }
+
+    // The progress bar is a child of the view itself, not of the viewport, so
+    // it keeps painting while viewport updates are suppressed
+    s.view->viewport()->setUpdatesEnabled(false);
+    ++s.heights_running;
+
+    for (int i = 0; i < rows; ++i)
+    {
+        const int lines = std::max(1, model->index(i, 0).data(live_callstacks_by_type_model::role::Lines).toInt());
+        header->resizeSection(i, padding + lines * line_spacing);
+
+        if ((size_t)(i + 1) % kCallstacksChunk == 0)
+        {
+            s.bar->setValue(progress_offset + i + 1);
+            QCoreApplication::processEvents();
+            if (s.generation != generation)
+            {
+                --s.heights_running;
+                s.view->viewport()->setUpdatesEnabled(true);
+                // The successor pass may never show the bar (e.g. the filter
+                // shrank the list below the progress threshold), so a
+                // bar-owning pass must hide it itself on cancellation
+                if (show_bar)
+                    s.bar->setVisible(false);
+                return false;
+            }
+        }
+    }
+
+    --s.heights_running;
+    s.view->viewport()->setUpdatesEnabled(true);
+    s.view->viewport()->update();
+
+    if (show_bar)
+        s.bar->setVisible(false);
+
+    return true;
+}
+
+void main_window::scheduleRowHeights(callstacks_view_state& s)
+{
+    // Populate passes apply heights themselves; coalesce everything else
+    // (sort clicks, filter changes) into one deferred pass per event-loop turn
+    if (s.populating || s.heights_scheduled)
+        return;
+
+    s.heights_scheduled = true;
+    QTimer::singleShot(0, this, [this, &s]()
+        {
+            s.heights_scheduled = false;
+            if (s.populating)
+                return;
+            const uint64_t generation = ++s.generation;
+            applyRowHeights(s, generation, 0, true);
+        });
 }
 
 void main_window::updateLiveObjectsSelectedSize()

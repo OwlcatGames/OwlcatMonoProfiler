@@ -91,6 +91,9 @@ public:
     {
         Callstack = Qt::UserRole + 0,
         Size = Qt::UserRole + 1,
+        // Number of text lines in the callstack; lets the view compute row
+        // heights without laying out the text (see main_window::applyRowHeights)
+        Lines = Qt::UserRole + 2,
     };
 
 private:
@@ -102,6 +105,8 @@ private:
         uint64_t size;
 
         std::vector<uint64_t> addresses;
+
+        int lines;
     };
     std::vector<row_data> m_rows;
     uint64_t m_total_size = 0;
@@ -114,7 +119,10 @@ public:
     QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override;
     void sort(int column, Qt::SortOrder order = Qt::AscendingOrder) override;
 
-    void update(uint64_t type, std::function<void(size_t cur, size_t max)> callback);
+    // Rebuilds rows for the given type. The callback may pump the event loop
+    // (it is never called while an insert is announced); returning false from
+    // it cancels the update, leaving the model empty.
+    void update(uint64_t type, owlcat::progress_func_t callback);
     void clear();
 
     uint64_t get_total_size() const { return m_total_size; }

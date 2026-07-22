@@ -87,6 +87,9 @@ public:
     enum role
     {
         Callstack = Qt::UserRole + 0,
+        // Same value as live_callstacks_by_type_model::role::Lines, so
+        // main_window::applyRowHeights works with either model
+        Lines = Qt::UserRole + 2,
     };
 
 private:
@@ -98,6 +101,8 @@ private:
         //uint64_t size;
 
         std::vector<uint64_t> addresses;
+
+        int lines;
     };
     std::vector<row_data> m_rows;
 public:
@@ -109,7 +114,10 @@ public:
     QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override;
     void sort(int column, Qt::SortOrder order = Qt::AscendingOrder) override;
 
-    void update(uint64_t type, std::function<void(size_t cur, size_t max)> callback);
+    // Rebuilds rows for the given type. The callback may pump the event loop
+    // (it is never called while an insert is announced); returning false from
+    // it cancels the update, leaving the model empty.
+    void update(uint64_t type, owlcat::progress_func_t callback);
     void clear();
 
     const std::vector<uint64_t>* get_addresses(const QModelIndex& index);
