@@ -1236,7 +1236,7 @@ namespace owlcat
 			return ok;
 		}
 
-		bool open_data(const std::string& file)
+		bool open_data(const std::string& file, progress_func_t progress)
 		{
 			if (m_thread.joinable())
 				return false;
@@ -1271,14 +1271,40 @@ namespace owlcat
 			_sopen_s(&m_extract_lock_fd, (extract_dir / "lock").string().c_str(), _O_CREAT | _O_RDWR, _SH_DENYRW, _S_IREAD | _S_IWRITE);
 #endif
 
+			// On failure or cancellation, release the lock and remove the partial
+			// extraction right away: our own held lock would otherwise shield the
+			// directory even from sweep_stale_extractions until the process exits
+			auto abandon_extraction = [&]()
+			{
+#if defined(WIN32)
+				if (m_extract_lock_fd != -1)
+				{
+					_close(m_extract_lock_fd);
+					m_extract_lock_fd = -1;
+				}
+#endif
+				std::error_code cleanup_ec;
+				std::filesystem::remove_all(extract_dir, cleanup_ec);
+			};
+
 			std::map<std::string, std::string> extracted;
-			if (!capture_container::unpack(file, extract_dir.string(), extracted))
+			auto unpack_progress = [&](uint64_t copied, uint64_t total)
+			{
+				return progress == nullptr || progress((size_t)copied, (size_t)total);
+			};
+			if (!capture_container::unpack(file, extract_dir.string(), extracted, unpack_progress))
+			{
+				abandon_extraction();
 				return false;
+			}
 
 			auto db_entry = extracted.find(capture_container::entry_database);
 			auto events_entry = extracted.find(capture_container::entry_events);
 			if (db_entry == extracted.end() || events_entry == extracted.end())
+			{
+				abandon_extraction();
 				return false;
+			}
 
 			m_extract_dir = extract_dir.string();
 			for (auto& entry : extracted)
@@ -1651,9 +1677,9 @@ public:
 
 	void close_db();
 
-	bool mono_profiler_client::open_data(const std::string& file)
+	bool mono_profiler_client::open_data(const std::string& file, progress_func_t progress)
 	{
-		return m_details->open_data(file);
+		return m_details->open_data(file, std::move(progress));
 	}
 
 	bool mono_profiler_client::is_connected() const

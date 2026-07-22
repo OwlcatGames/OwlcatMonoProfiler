@@ -71,6 +71,9 @@ public:
 signals:
     void onLiveObjectTypesProgressInitiated(int min, int max);
     void onLiveObjectTypesProgressChanged(int value);
+    // Capture-open progress in permille (the open runs on a worker thread,
+    // the modal progress dialog lives on the GUI thread)
+    void onOpenDataProgress(int permille);
     void onObjectReferencesFound(std::string error, std::vector<uint64_t> addresses, std::vector<owlcat::object_references_t> result);
 
 public slots:
@@ -127,6 +130,7 @@ private:
     bool trySaveUnsavedData();
     void findObjectsReferences(const std::vector<uint64_t>& addresses);
     void export_types_to_csv();
+    void finishOpenData();
     // Sets every row's height from the model's Lines role (chunked, pumps
     // events, drives s.bar when manage_bar). Returns false if cancelled.
     bool applyRowHeights(callstacks_view_state& s, uint64_t generation, int progress_offset, bool manage_bar);
@@ -178,6 +182,7 @@ private:
     std::shared_ptr<graphs_data> m_data;
 
     QScopedPointer<QThread> m_types_worker;
+    QScopedPointer<QThread> m_open_worker;
 
     QScopedPointer<QMenu> m_callstacksMenu;
     QScopedPointer<QMenu> m_referencesMenu;

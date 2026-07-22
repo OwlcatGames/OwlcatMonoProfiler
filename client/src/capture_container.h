@@ -2,6 +2,8 @@
 
 #include <string>
 #include <map>
+#include <functional>
+#include <cstdint>
 
 namespace owlcat
 {
@@ -25,6 +27,10 @@ namespace owlcat
 
 		// Extracts all entries of a container into the given directory (which must
 		// exist). Returns entry name -> extracted file path.
-		bool unpack(const std::string& container_path, const std::string& destination_dir, std::map<std::string, std::string>& extracted_files);
+		// The optional progress callback receives (copied_bytes, total_bytes) as
+		// the copy proceeds; returning false from it aborts the unpack, which then
+		// returns false. Partially extracted files are left behind - the caller
+		// owns the destination directory and its cleanup.
+		bool unpack(const std::string& container_path, const std::string& destination_dir, std::map<std::string, std::string>& extracted_files, const std::function<bool(uint64_t copied, uint64_t total)>& progress = nullptr);
 	}
 }

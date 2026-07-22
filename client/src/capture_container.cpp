@@ -48,8 +48,10 @@ namespace owlcat
 
 		using namespace format;
 
-		// Copies count bytes between two files using a scratch buffer. Returns false on any error.
-		static bool copy_bytes(FILE* from, FILE* to, uint64_t count)
+		// Copies count bytes between two files using a scratch buffer. Returns false
+		// on any error, or if on_block (called after each copied block with its
+		// size) returns false.
+		static bool copy_bytes(FILE* from, FILE* to, uint64_t count, const std::function<bool(uint64_t block)>& on_block = nullptr)
 		{
 			std::vector<uint8_t> buffer(1024 * 1024);
 			while (count > 0)
@@ -60,6 +62,8 @@ namespace owlcat
 				if (fwrite(buffer.data(), 1, block, to) != block)
 					return false;
 				count -= block;
+				if (on_block != nullptr && !on_block(block))
+					return false;
 			}
 			return true;
 		}
@@ -126,7 +130,7 @@ namespace owlcat
 			return ok;
 		}
 
-		bool unpack(const std::string& container_path, const std::string& destination_dir, std::map<std::string, std::string>& extracted_files)
+		bool unpack(const std::string& container_path, const std::string& destination_dir, std::map<std::string, std::string>& extracted_files, const std::function<bool(uint64_t copied, uint64_t total)>& progress)
 		{
 			extracted_files.clear();
 
@@ -156,6 +160,11 @@ namespace owlcat
 				return false;
 			}
 
+			uint64_t total_bytes = 0;
+			for (auto& entry : entries)
+				total_bytes += entry.size;
+			uint64_t copied_bytes = 0;
+
 			bool ok = true;
 			for (auto& entry : entries)
 			{
@@ -169,7 +178,12 @@ namespace owlcat
 					break;
 				}
 
-				ok = _fseeki64(container, entry.offset, SEEK_SET) == 0 && copy_bytes(container, out, entry.size);
+				auto on_block = [&](uint64_t block)
+				{
+					copied_bytes += block;
+					return progress == nullptr || progress(copied_bytes, total_bytes);
+				};
+				ok = _fseeki64(container, entry.offset, SEEK_SET) == 0 && copy_bytes(container, out, entry.size, on_block);
 				fclose(out);
 
 				if (!ok)

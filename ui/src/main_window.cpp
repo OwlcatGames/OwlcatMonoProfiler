@@ -19,6 +19,9 @@
 #include <qfiledialog.h>
 #include <qcheckbox.h>
 #include <qtimer.h>
+#include <qprogressdialog.h>
+#include <qfileinfo.h>
+#include <atomic>
 
 // Callstacks-table population/row-height passes: rows per event-loop pump, and
 // the row count above which the progress bar is shown (below it the pass is
@@ -426,12 +429,64 @@ void main_window::onOpenData()
 
     if (file_name.isEmpty())
         return;
-    
-    if (!m_client.open_data(file_name.toStdString().c_str()))
-    {
-        return;
-    }
 
+    if (m_open_worker != nullptr && m_open_worker->isRunning())
+        return;
+
+    // Opening unpacks the (potentially huge) container into the temp directory,
+    // so it runs on a worker thread behind an application-modal progress dialog
+    auto* dialog = new QProgressDialog(tr("Opening %1...").arg(QFileInfo(file_name).fileName()), tr("Cancel"), 0, 1000, this);
+    dialog->setWindowModality(Qt::ApplicationModal);
+    dialog->setMinimumDuration(500);
+    // Keep the dialog up for the whole open: the bar reaches its maximum when
+    // the unpack finishes, but the database is still being loaded after that
+    dialog->setAutoClose(false);
+    dialog->setAutoReset(false);
+
+    connect(this, &main_window::onOpenDataProgress, dialog, &QProgressDialog::setValue, Qt::ConnectionType::QueuedConnection);
+
+    auto open_cancelled = std::make_shared<std::atomic<bool>>(false);
+    auto open_succeeded = std::make_shared<std::atomic<bool>>(false);
+    connect(dialog, &QProgressDialog::canceled, this, [open_cancelled]() { open_cancelled->store(true); });
+
+    m_open_worker.reset(new ui_thread(
+        this,
+        [this, path = std::string(file_name.toStdString()), open_cancelled, open_succeeded]()
+        {
+            size_t last_permille = (size_t)-1;
+            bool ok = m_client.open_data(path, [&](size_t cur, size_t max)
+                {
+                    if (open_cancelled->load())
+                        return false;
+                    size_t permille = max > 0 ? cur * 1000 / max : 0;
+                    if (permille != last_permille)
+                    {
+                        last_permille = permille;
+                        emit onOpenDataProgress((int)permille);
+                    }
+                    return true;
+                });
+            open_succeeded->store(ok);
+        },
+        [this, dialog, open_succeeded]()
+        {
+            dialog->close();
+            dialog->deleteLater();
+
+            if (!open_succeeded->load())
+                return;
+
+            finishOpenData();
+        }));
+
+    m_open_worker->start();
+}
+
+// The GUI-thread part of opening a capture: hooks the freshly opened data up
+// to the models and graphs. Split out of onOpenData because the open itself
+// runs on a worker thread.
+void main_window::finishOpenData()
+{
     m_is_db_temporary = false;
 
     m_data->clear();
@@ -1050,7 +1105,12 @@ void main_window::calculateLiveObjects(int from_frame, int to_frame)
                         first_time = false;
                         emit onLiveObjectTypesProgressInitiated(0, (int)max);
                     }
-                    size_t percent = max > 0 ? cur * 100 / max : 0;
+                    size_t percent = 0;
+                    if (cur < std::numeric_limits<size_t>::max() / 100)                        
+                        percent = max > 0 ? cur * 100 / max : 0;
+                    else
+                        percent = max > 0 ? (size_t)(floor((double)cur/max * 100)) : 0;
+
                     if (percent > last_percent)
                     {
                         last_percent = percent;

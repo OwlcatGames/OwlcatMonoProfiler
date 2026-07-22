@@ -38,6 +38,9 @@ namespace owlcat
 	using pause_app_callback = std::function<void(bool ok)>;
 	using resume_app_callback = std::function<void(bool ok)>;
 
+	// Universal progress callback type; return false to cancel the operation
+	using progress_func_t = std::function<bool(size_t current, size_t max)>;
+
 	class mono_profiler_client_data;
 	/*
 		Profiler client class. It handles network communucations, stores the profiling data in database and provides functions to query it
@@ -82,8 +85,11 @@ namespace owlcat
 		void close_db();
 		// Saves in-memory or temporary database to a persistent file
 		bool save_db(const std::string& new_db_file_name, bool move);
-		// Opens previously saved profiling data
-		bool open_data(const std::string& file);
+		// Opens previously saved profiling data. The optional progress callback
+		// reports (bytes_copied, bytes_total) while the container is unpacked into
+		// the temp directory - the dominant cost for large captures; returning
+		// false from it cancels the open (open_data then returns false).
+		bool open_data(const std::string& file, progress_func_t progress = nullptr);
 
 		// Returns true if the client is connected to a server
 		bool is_connected() const;
@@ -157,9 +163,6 @@ namespace owlcat
 		// The ID of callstack where the object was allocated
 		uint64_t callstack_id;
 	};
-
-	// Universal progress callback typr
-	using progress_func_t = std::function<bool(size_t current, size_t max)>;
 
 	/*
 		Interface for querying profiling data saved in database
