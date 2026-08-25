@@ -75,6 +75,25 @@ namespace owlcat
                 },
             }
         },
+        //----------------------------------------------------------------
+        // Identities of native modules referenced by callstack frames (see SRV_MODULE):
+        // the module's full path in the target process and its PDB signature (RSDS
+        // GUID+age+path, GUID as 32 hex chars). Persisted so symbolication of a saved
+        // capture can match the exact PDB, not just the first name match on the path.
+        {
+            "Add Modules table",
+            {
+                {
+                    "CREATE TABLE Modules("
+                    "name TEXT PRIMARY KEY NOT NULL,"
+                    "path TEXT NOT NULL,"
+                    "pdb_guid TEXT NOT NULL,"
+                    "pdb_age INT NOT NULL,"
+                    "pdb_name TEXT NOT NULL"
+                    ")"
+                },
+            }
+        },
     };
 
     // Important: queries are not registred before this call, so we can't use named queries here, unless we register them ourselves

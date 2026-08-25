@@ -304,6 +304,62 @@ namespace owlcat
 		return count;
 	}
 
+	// Extracts the RSDS CodeView record (PDB GUID + age + build-time pdb path) from a
+	// loaded module's debug directory. All-POD so it can sit inside SEH (see below).
+	static bool read_pdb_signature_impl(const uint8_t* base, uint8_t guid[16], uint32_t* age, char* pdb_name, size_t pdb_name_size)
+	{
+		auto dos = (const IMAGE_DOS_HEADER*)base;
+		if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+			return false;
+		auto nt = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+		if (nt->Signature != IMAGE_NT_SIGNATURE)
+			return false;
+
+		const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG];
+		if (dir.VirtualAddress == 0 || dir.Size < sizeof(IMAGE_DEBUG_DIRECTORY))
+			return false;
+
+		auto entries = (const IMAGE_DEBUG_DIRECTORY*)(base + dir.VirtualAddress);
+		for (size_t i = 0, n = dir.Size / sizeof(IMAGE_DEBUG_DIRECTORY); i < n; ++i)
+		{
+			// RSDS record layout: "RSDS" + GUID(16) + age(4) + zero-terminated pdb path
+			if (entries[i].Type != IMAGE_DEBUG_TYPE_CODEVIEW || entries[i].AddressOfRawData == 0 || entries[i].SizeOfData < 25)
+				continue;
+
+			const uint8_t* cv = base + entries[i].AddressOfRawData;
+			if (memcmp(cv, "RSDS", 4) != 0)
+				continue;
+
+			memcpy(guid, cv + 4, 16);
+			*age = *(const uint32_t*)(cv + 20);
+
+			size_t name_max = entries[i].SizeOfData - 24;
+			if (name_max > pdb_name_size - 1)
+				name_max = pdb_name_size - 1;
+			memcpy(pdb_name, cv + 24, name_max);
+			// The record's path is zero-terminated within SizeOfData; this is a backstop
+			pdb_name[name_max] = 0;
+			return true;
+		}
+
+		return false;
+	}
+
+	// A module can in principle unload between resolving a frame and reading its
+	// headers, so guard the read with SEH like other memory we don't control
+	static bool read_pdb_signature(void* module, uint8_t guid[16], uint32_t* age, char* pdb_name, size_t pdb_name_size)
+	{
+		__try
+		{
+			return read_pdb_signature_impl((const uint8_t*)module, guid, age, pdb_name, pdb_name_size);
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+		}
+
+		return false;
+	}
+
 	// Returns the module of the profiler DLL itself
 	static HMODULE own_module()
 	{
@@ -392,6 +448,11 @@ namespace owlcat
 			const char* basename = strrchr(path, '\\');
 			basename = basename != nullptr ? basename + 1 : path;
 
+			// Report the module's identity (path + PDB signature) once, before the
+			// frame line that references it, so the client can match the right PDB
+			if (m_reported_modules.insert((void*)module).second)
+				report_module_identity((void*)module, path, basename);
+
 			char line[512];
 			snprintf(line, sizeof(line) - 1, "%s+0x%llX\n", basename, (unsigned long long)((char*)ip - (char*)module));
 			entry.text = line;
@@ -411,6 +472,18 @@ namespace owlcat
 		entry.frame_id = intern_frame_line(entry.text);
 
 		return m_ip_cache.emplace(ip, std::move(entry)).first->second;
+	}
+
+	void worker_thread::report_module_identity(void* module, const char* path, const char* basename)
+	{
+		uint8_t guid[16] = {};
+		uint32_t age = 0;
+		char pdb_name[MAX_PATH] = {};
+		// On failure the signature stays all-zero: the client then knows the module
+		// has no usable debug directory and falls back to name-based matching
+		read_pdb_signature(module, guid, &age, pdb_name, sizeof(pdb_name));
+
+		m_events_sink->report_module(basename, path, guid, age, pdb_name);
 	}
 #endif
 

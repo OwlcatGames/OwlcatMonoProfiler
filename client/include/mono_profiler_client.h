@@ -33,6 +33,28 @@ namespace owlcat
 		std::vector<uint64_t> callstacks;
 	};
 
+	/*
+		Symbol resolution status of one native module referenced by callstack frames
+	*/
+	struct symbol_module_status
+	{
+		enum class state
+		{
+			pending,  // module referenced, but no frame resolved yet
+			loaded,   // PDB or other debug info found and parsed
+			mismatch, // only a wrong-version PDB was found; its names are NOT used
+			exports,  // no PDB; function names come from the DLL export table only
+			none,     // no symbols found in the search path
+			failed,   // the module could not be registered for symbol resolution
+		};
+
+		// Module name as it appears in callstack frames, e.g. "UnityPlayer.dll"
+		std::string module;
+		state status;
+		// Path of the loaded PDB (or image, for exports), if any
+		std::string symbol_file;
+	};
+
 	// Callbacks for commands
 	using find_references_callback = std::function<void(const std::vector<uint64_t> addresses, std::string error, const std::vector<object_references_t>& result)>;
 	using pause_app_callback = std::function<void(bool ok)>;
@@ -123,6 +145,11 @@ namespace owlcat
 		// loaded from the current search path (i.e. missing PDBs). Meaningful once
 		// get_symbolication_pending returns 0.
 		std::vector<std::string> get_unresolved_symbol_modules();
+
+		// Per-module symbol resolution status for every module referenced by native
+		// callstack frames so far: whether a PDB was found and parsed, and which file
+		// was loaded. Updated in the background as callstacks are resolved.
+		std::vector<symbol_module_status> get_symbol_module_status();
 
 		// Returns an interface for querying profiling data
 		mono_profiler_client_data* get_data();

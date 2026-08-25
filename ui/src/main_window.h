@@ -26,6 +26,8 @@ namespace Ui {
     class MainWindow;
 }
 
+class symbol_status_dialog;
+
 /*
     Thread class that calls a callback on main thread when finished
 */
@@ -83,6 +85,7 @@ public slots:
     void onRunUnityApp();
     void onStopProfiling();
     void onConfigureSymbolPaths();
+    void onShowSymbolStatus();
     void onAllocationsScrolled(int);    
     void onLiveObjectTypeSelected(const QItemSelection& selected, const QItemSelection& deselected);
     void onSearchTypeSelected(const QItemSelection& selected, const QItemSelection& deselected);
@@ -187,6 +190,9 @@ private:
     QScopedPointer<QMenu> m_callstacksMenu;
     QScopedPointer<QMenu> m_referencesMenu;
     QScopedPointer<QMenu> m_liveObjectsMenu;
+
+    // Modeless "Symbol resolution status" window; created on first use, parented to this
+    symbol_status_dialog* m_symbol_status_dialog = nullptr;
 
     float m_zoom = 1.0f;
     int m_pos = 0;

@@ -44,6 +44,12 @@ namespace owlcat
 		virtual void report_frame(uint32_t frame_id, const char* text) = 0;
 		// A callstack, as the sequence of frame ids (top of stack first) that make it up.
 		virtual void report_callstack(uint32_t callstack_id, const std::vector<uint32_t>& frame_ids) = 0;
+		// Identity of a native module referenced by "Module.dll+0xRVA" frame lines: full
+		// path in this process and PDB signature (GUID+age+name from the PE debug
+		// directory; all zero/empty if the module has no debug directory). Reported once
+		// per module, before the first frame line that references it, so the client can
+		// find and validate the matching PDB. No-op by default.
+		virtual void report_module(const char* name, const char* full_path, const uint8_t pdb_guid[16], uint32_t pdb_age, const char* pdb_name) {}
 		// Per-frame whole-process memory snapshot (see SRV_MEMSTATS). No-op by default so
 		// sinks that don't care (e.g. the test) needn't implement it.
 		virtual void report_memstats(uint64_t frame, uint64_t working_set, uint64_t committed, uint64_t gc_heap) {}

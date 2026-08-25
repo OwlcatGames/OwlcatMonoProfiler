@@ -3,6 +3,7 @@
 #include "connect_dialog.h"
 #include "run_dialog.h"
 #include "symbol_paths_dialog.h"
+#include "symbol_status_dialog.h"
 #include <qsettings.h>
 #include "qwt_point_data.h"
 #include "qwt_picker_machine.h"
@@ -183,6 +184,7 @@ main_window::main_window(QWidget* parent) :
     // --------- Symbol paths ---------
 
     connect(m_ui->actionSymbolPaths, &QAction::triggered, this, &main_window::onConfigureSymbolPaths);
+    connect(m_ui->actionSymbolStatus, &QAction::triggered, this, &main_window::onShowSymbolStatus);
     // Apply the saved symbol search path so native callstacks resolve from the start
     {
         QStringList paths = QSettings().value("symbols/paths").toStringList();
@@ -708,6 +710,16 @@ void main_window::onConfigureSymbolPaths()
 
     // Apply immediately: the client re-resolves all known callstacks in the background
     m_client.set_symbol_paths(paths.join(';').toStdString());
+}
+
+void main_window::onShowSymbolStatus()
+{
+    if (m_symbol_status_dialog == nullptr)
+        m_symbol_status_dialog = new symbol_status_dialog(&m_client, this);
+
+    m_symbol_status_dialog->show();
+    m_symbol_status_dialog->raise();
+    m_symbol_status_dialog->activateWindow();
 }
 
 void main_window::onAllocationsScrolled(int value)

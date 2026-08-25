@@ -424,6 +424,7 @@
      <string>Settings</string>
     </property>
     <addaction name="actionSymbolPaths"/>
+    <addaction name="actionSymbolStatus"/>
    </widget>
    <addaction name="menuFile"/>
    <addaction name="menuSettings"/>
@@ -476,6 +477,14 @@
    </property>
    <property name="toolTip">
     <string>Configure local directories searched for PDBs to resolve native callstacks</string>
+   </property>
+  </action>
+  <action name="actionSymbolStatus">
+   <property name="text">
+    <string>Symbol status...</string>
+   </property>
+   <property name="toolTip">
+    <string>Show for which modules PDBs were found when resolving native callstacks</string>
    </property>
   </action>
   <action name="actionStart_Profiling">

@@ -33,6 +33,9 @@ namespace owlcat
         cursor_t select_memstats(db_t& db, uint64_t from_frame, uint64_t to_frame);
         cursor_t select_types(db_t& db);
         cursor_t select_callstacks(db_t& db);
+        // Native module identities (see SRV_MODULE); pdb_guid is 32 hex chars
+        bool insert_module(db_t& db, const std::string& name, const std::string& path, const std::string& pdb_guid, uint64_t pdb_age, const std::string& pdb_name);
+        cursor_t select_modules(db_t& db);
         cursor_t select_last_good_size(db_t& db, uint64_t from_frame);
 
         bool register_queries(persistent_storage::persistent_storage& db);

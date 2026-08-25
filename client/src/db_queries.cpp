@@ -16,6 +16,8 @@ namespace owlcat
         query_id_t id_select_last_good_size = "select_last_good_size";
         query_id_t id_insert_memstats = "insert_memstats";
         query_id_t id_select_memstats = "select_memstats";
+        query_id_t id_insert_module = "insert_module";
+        query_id_t id_select_modules = "select_modules";
 
         bool insert_type(db_t& db, const std::string& type, uint64_t id)
         {
@@ -89,6 +91,23 @@ namespace owlcat
             return db.query_data(queries::id_select_callstacks, {});
         }
 
+        bool insert_module(db_t& db, const std::string& name, const std::string& path, const std::string& pdb_guid, uint64_t pdb_age, const std::string& pdb_name)
+        {
+            return db.query(queries::id_insert_module,
+                {
+                    { "name", name },
+                    { "path", path },
+                    { "guid", pdb_guid },
+                    { "age", pdb_age },
+                    { "pdb_name", pdb_name },
+                });
+        }
+
+        cursor_t select_modules(db_t& db)
+        {
+            return db.query_data(queries::id_select_modules, {});
+        }
+
         cursor_t select_last_good_size(db_t& db, uint64_t from_frame)
         {
             return db.query_data(queries::id_select_last_good_size, { {"from", from_frame} });
@@ -147,6 +166,15 @@ namespace owlcat
                 "FROM FrameStats "
                 "WHERE frame >= $from AND frame <= $to "
                 "ORDER BY frame"
+            );
+            // REPLACE: the server re-sends definitions when a client reconnects, and a
+            // module can be re-reported with a new identity after a profiler restart
+            register_query(queries::id_insert_module,
+                "INSERT OR REPLACE INTO Modules (name, path, pdb_guid, pdb_age, pdb_name)"
+                "VALUES ($name, $path, $guid, $age, $pdb_name)"
+            );
+            register_query(queries::id_select_modules,
+                "SELECT name, path, pdb_guid, pdb_age, pdb_name FROM Modules"
             );
             register_query(queries::id_insert_memstats,
                 "INSERT OR REPLACE INTO MemStats (frame, working_set, committed, gc_heap)"

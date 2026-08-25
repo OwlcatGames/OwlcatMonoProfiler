@@ -35,6 +35,13 @@ namespace owlcat
 			// GC heap). Lets the UI graph total committed memory against the tracked allocations
 			// - the gap is native allocator pool overhead the per-allocation view can't show.
 			SRV_MEMSTATS,
+			// Identity of a native module referenced by "Module.dll+0xRVA" frames: its full
+			// path in the target process and its PDB signature (GUID+age+name from the PE
+			// debug directory). Without this the client can only match PDBs by file name,
+			// which picks the wrong PDB when several versions of the same module are on the
+			// symbol search path. Sent once per module, before the first frame line that
+			// references it.
+			SRV_MODULE,
 		};
 
 		enum command

@@ -10,6 +10,7 @@
 #include <mutex>
 #include <chrono>
 #include <string>
+#include <cstring>
 #include <unordered_map>
 
 #include <memory_writer.h>
@@ -40,6 +41,16 @@ namespace owlcat
 				report_alloc/report_free/report_type/report_callstack), so no locking is needed.
 			*/
 			std::unordered_map<uint32_t, std::string> m_type_defs;
+			// Module identity definitions (name -> path + PDB signature), a handful of
+			// entries. Kept for re-send like the other definitions.
+			struct module_def
+			{
+				std::string path;
+				uint8_t pdb_guid[16];
+				uint32_t pdb_age;
+				std::string pdb_name;
+			};
+			std::unordered_map<std::string, module_def> m_module_defs;
 			// Frame-line definitions, indexed by frame id (ids are dense, assigned 0..N by
 			// the worker). The ~tens of thousands of unique lines, versus millions of callstacks.
 			std::vector<std::string> m_frame_defs;
@@ -61,6 +72,21 @@ namespace owlcat
 				writer.write_string(name);
 
 				m_network.write_message(protocol::message::SRV_TYPE, (uint32_t)data.size(), (uint8_t*)&data[0]);
+			}
+
+			void send_module(const std::string& name, const module_def& def)
+			{
+				static std::vector<uint8_t> data;
+				data.reserve(1024);
+				data.clear();
+				memory_writer writer(data);
+				writer.write_string(name.c_str());
+				writer.write_string(def.path.c_str());
+				writer.write_buffer(def.pdb_guid, sizeof(def.pdb_guid));
+				writer.write_uint32(def.pdb_age);
+				writer.write_string(def.pdb_name.c_str());
+
+				m_network.write_message(protocol::message::SRV_MODULE, (uint32_t)data.size(), (uint8_t*)&data[0]);
 			}
 
 			void send_frame(uint32_t frame_id, const char* text)
@@ -100,6 +126,9 @@ namespace owlcat
 
 				for (auto& def : m_type_defs)
 					send_type(def.first, def.second.c_str());
+				// Modules before frames: symbolication of a frame line uses the module identity
+				for (auto& def : m_module_defs)
+					send_module(def.first, def.second);
 				// Frames before callstacks: a callstack references frame ids
 				for (uint32_t id = 0; id < (uint32_t)m_frame_defs.size(); ++id)
 					send_frame(id, m_frame_defs[id].c_str());
@@ -160,6 +189,22 @@ namespace owlcat
 
 				update_definitions();
 				send_type(type_id, name);
+			}
+
+			virtual void report_module(const char* name, const char* full_path, const uint8_t pdb_guid[16], uint32_t pdb_age, const char* pdb_name) override
+			{
+				// Remember for late-connecting clients, like the other definitions
+				module_def& def = m_module_defs[name];
+				def.path = full_path;
+				memcpy(def.pdb_guid, pdb_guid, sizeof(def.pdb_guid));
+				def.pdb_age = pdb_age;
+				def.pdb_name = pdb_name;
+
+				if (!m_network.is_connected())
+					return;
+
+				update_definitions();
+				send_module(name, def);
 			}
 
 			virtual void report_frame(uint32_t frame_id, const char* text) override

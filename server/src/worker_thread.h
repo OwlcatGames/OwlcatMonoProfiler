@@ -9,6 +9,7 @@
 #include <shared_mutex>
 #include <condition_variable>
 #include <unordered_map>
+#include <unordered_set>
 #include <concurrentqueue.h>
 //#include "tsl/robin_map.h"
 
@@ -455,6 +456,10 @@ namespace owlcat
 		};
 		std::unordered_map<void*, ip_entry> m_ip_cache;
 
+		// Modules whose identity (full path + PDB signature) was already reported
+		// via events_sink::report_module
+		std::unordered_set<void*> m_reported_modules;
+
 		// The domain used for jit info lookups. Captured on the game's threads (which are
 		// attached to the runtime), used on the worker thread.
 		std::atomic<void*> m_jit_domain{nullptr};
@@ -502,6 +507,9 @@ namespace owlcat
 		// Resolves a raw instruction pointer to a managed method or a native module+offset,
 		// caching the result by address
 		const ip_entry& resolve_ip(void* ip);
+		// Reports a module's identity (full path + PDB signature from its debug
+		// directory) to the sink, once per module (see events_sink::report_module)
+		void report_module_identity(void* module, const char* path, const char* basename);
 #endif
 		// Returns an id for the type, reporting a definition to the client on first sight
 		uint32_t intern_type(MonoClass* klass);

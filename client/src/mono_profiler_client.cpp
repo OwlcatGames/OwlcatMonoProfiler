@@ -11,6 +11,7 @@
 
 #include <memory>
 #include <string>
+#include <cstring>
 #include <thread>
 #include <filesystem>
 #include <cassert>
@@ -34,6 +35,37 @@
 
 namespace owlcat
 {
+	// PDB GUIDs cross the DB as 32 hex chars (SQLite has no comfortable blob literals
+	// and the value is occasionally useful to eyeball in a DB browser)
+	static std::string guid_to_hex(const uint8_t guid[16])
+	{
+		static const char digits[] = "0123456789abcdef";
+		std::string result(32, '0');
+		for (int i = 0; i < 16; ++i)
+		{
+			result[i * 2] = digits[guid[i] >> 4];
+			result[i * 2 + 1] = digits[guid[i] & 0xF];
+		}
+		return result;
+	}
+
+	static void hex_to_guid(const std::string& hex, uint8_t guid[16])
+	{
+		memset(guid, 0, 16);
+		if (hex.size() < 32)
+			return;
+
+		auto nibble = [](char c) -> uint8_t
+		{
+			if (c >= '0' && c <= '9') return c - '0';
+			if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+			if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+			return 0;
+		};
+		for (int i = 0; i < 16; ++i)
+			guid[i] = (uint8_t)((nibble(hex[i * 2]) << 4) | nibble(hex[i * 2 + 1]));
+	}
+
 	struct profiler_event
 	{
 		enum type_t
@@ -416,6 +448,22 @@ namespace owlcat
 		// Snapshot of symbol_resolver::get_unresolved_modules, updated by the symbol
 		// thread; guarded by m_display_mutex
 		std::vector<std::string> m_unresolved_modules;
+		// Snapshot of per-module symbol resolution status, updated by the symbol
+		// thread; guarded by m_display_mutex
+		std::vector<symbol_module_status> m_symbol_modules;
+		// Module identities (full path + PDB signature, see SRV_MODULE) waiting to be
+		// applied to the resolver on the symbol thread; guarded by m_symbol_mutex
+		std::vector<std::pair<std::string, symbol_resolver::module_identity>> m_pending_module_identities;
+
+		// Queues a module identity for application on the symbol thread (all DbgHelp
+		// use stays there). Must be queued before the callstacks that reference the
+		// module, which the wire/DB ordering guarantees.
+		void queue_module_identity(const std::string& name, const symbol_resolver::module_identity& identity)
+		{
+			std::scoped_lock lock(m_symbol_mutex);
+			m_pending_module_identities.push_back({ name, identity });
+			m_symbol_cv.notify_one();
+		}
 
 		// Queues a callstack for background symbolication
 		void queue_for_symbolication(uint64_t callstack_id, const std::string& raw)
@@ -440,14 +488,19 @@ namespace owlcat
 			while (true)
 			{
 				std::pair<uint64_t, std::string> item;
+				bool has_item = false;
 				bool path_changed = false;
 				bool reset = false;
 				std::string new_path;
+				std::vector<std::pair<std::string, symbol_resolver::module_identity>> identities;
 				{
 					std::unique_lock<std::mutex> lock(m_symbol_mutex);
-					m_symbol_cv.wait(lock, [&] { return m_symbol_stop || m_symbol_reset || m_symbol_path_changed || !m_symbol_queue.empty(); });
+					m_symbol_cv.wait(lock, [&] { return m_symbol_stop || m_symbol_reset || m_symbol_path_changed || !m_symbol_queue.empty() || !m_pending_module_identities.empty(); });
 					if (m_symbol_stop)
 						break;
+
+					identities.swap(m_pending_module_identities);
+
 					if (m_symbol_reset)
 					{
 						m_symbol_reset = false;
@@ -459,12 +512,18 @@ namespace owlcat
 						path_changed = true;
 						new_path = m_pending_symbol_path;
 					}
-					else
+					else if (!m_symbol_queue.empty())
 					{
 						item = m_symbol_queue.front();
 						m_symbol_queue.pop_front();
+						has_item = true;
 					}
 				}
+
+				// Module identities first: they determine how the frames of any queued
+				// callstack resolve
+				for (auto& identity : identities)
+					m_symbol_resolver->set_module_identity(identity.first, identity.second);
 
 				if (reset)
 				{
@@ -504,6 +563,10 @@ namespace owlcat
 					continue;
 				}
 
+				// Woken only to apply module identities
+				if (!has_item)
+					continue;
+
 				known.push_back(item);
 				std::string display = m_symbol_resolver->symbolicate(item.second);
 				// Only store if symbolication actually changed the text; otherwise
@@ -518,12 +581,34 @@ namespace owlcat
 			}
 		}
 
-		// Publishes the resolver's unresolved-module list (symbol thread only)
+		// Publishes the resolver's unresolved-module list and per-module symbol
+		// status (symbol thread only)
 		void update_unresolved_modules()
 		{
 			auto unresolved = m_symbol_resolver->get_unresolved_modules();
+
+			auto modules = m_symbol_resolver->get_modules();
+			std::vector<symbol_module_status> status;
+			status.reserve(modules.size());
+			for (auto& m : modules)
+			{
+				symbol_module_status::state state;
+				switch (m.status)
+				{
+				case symbol_resolver::module_symbols_info::status_t::loaded:   state = symbol_module_status::state::loaded; break;
+				case symbol_resolver::module_symbols_info::status_t::mismatch: state = symbol_module_status::state::mismatch; break;
+				case symbol_resolver::module_symbols_info::status_t::exports:  state = symbol_module_status::state::exports; break;
+				case symbol_resolver::module_symbols_info::status_t::none:     state = symbol_module_status::state::none; break;
+				case symbol_resolver::module_symbols_info::status_t::failed:   state = symbol_module_status::state::failed; break;
+				case symbol_resolver::module_symbols_info::status_t::pending:
+				default:                                                        state = symbol_module_status::state::pending; break;
+				}
+				status.push_back({ std::move(m.name), state, std::move(m.symbol_file) });
+			}
+
 			std::scoped_lock lock(m_display_mutex);
 			m_unresolved_modules = std::move(unresolved);
+			m_symbol_modules = std::move(status);
 		}
 
 		uint64_t m_next_type_id = 0;
@@ -672,6 +757,25 @@ namespace owlcat
 
 				m_type_to_id_map.insert(std::make_pair(type, type_id));
 				m_id_to_type_map.insert(std::make_pair(type_id, type));
+			}
+
+			// Module identities must reach the symbol thread before the callstacks queued
+			// below, so their frames resolve against the right PDBs. Captures saved before
+			// the Modules table simply have no rows here (name-only fallback).
+			auto modules_cursor = queries::select_modules(m_db);
+			if (modules_cursor.has_error())
+				return false;
+
+			while (modules_cursor.next())
+			{
+				auto name = modules_cursor.get_string("name");
+				symbol_resolver::module_identity identity;
+				identity.path = modules_cursor.get_string("path");
+				hex_to_guid(modules_cursor.get_string("pdb_guid"), identity.pdb_guid);
+				identity.pdb_age = (uint32_t)modules_cursor.get_uint64("pdb_age");
+				identity.pdb_name = modules_cursor.get_string("pdb_name");
+
+				queue_module_identity(name, identity);
 			}
 
 			auto callstacks_cursor = queries::select_callstacks(m_db);
@@ -915,6 +1019,26 @@ namespace owlcat
 					else
 						printf("Received callstack definition, but msg is broken\n");
 				}
+				else if (msg.header.type == protocol::message::SRV_MODULE)
+				{
+					std::string name;
+					symbol_resolver::module_identity identity;
+					bool all_ok =
+						reader.read_string(name) &&
+						reader.read_string(identity.path) &&
+						reader.read_buffer(identity.pdb_guid, sizeof(identity.pdb_guid)) &&
+						reader.read_uint32(identity.pdb_age) &&
+						reader.read_string(identity.pdb_name);
+
+					if (all_ok)
+					{
+						// Persist so a saved capture symbolicates against the right PDBs too
+						queries::insert_module(m_db, name, identity.path, guid_to_hex(identity.pdb_guid), identity.pdb_age, identity.pdb_name);
+						queue_module_identity(name, identity);
+					}
+					else
+						printf("Received module definition, but msg is broken\n");
+				}
 				else if (msg.header.type == protocol::message::SRV_MEMSTATS)
 				{
 					uint64_t frame, working_set, committed, gc_heap;
@@ -1004,6 +1128,12 @@ namespace owlcat
 		size_t get_symbolication_pending() const
 		{
 			return m_symbol_pending + (m_symbol_repath_active ? 1 : 0);
+		}
+
+		std::vector<symbol_module_status> get_symbol_module_status()
+		{
+			std::scoped_lock lock(m_display_mutex);
+			return m_symbol_modules;
 		}
 
 		std::vector<std::string> get_unresolved_symbol_modules()
@@ -1730,6 +1860,11 @@ public:
 	std::vector<std::string> mono_profiler_client::get_unresolved_symbol_modules()
 	{
 		return m_details->get_unresolved_symbol_modules();
+	}
+
+	std::vector<symbol_module_status> mono_profiler_client::get_symbol_module_status()
+	{
+		return m_details->get_symbol_module_status();
 	}
 
 	void mono_profiler_client::find_objects_references(const std::vector<uint64_t>& addresses, find_references_callback callback)

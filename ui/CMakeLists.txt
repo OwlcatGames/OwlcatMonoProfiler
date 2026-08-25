@@ -19,6 +19,8 @@ set( ALL_SOURCES
     ${SOURCES_ROOT}/run_dialog.cpp
 	${SOURCES_ROOT}/symbol_paths_dialog.h
     ${SOURCES_ROOT}/symbol_paths_dialog.cpp
+	${SOURCES_ROOT}/symbol_status_dialog.h
+    ${SOURCES_ROOT}/symbol_status_dialog.cpp
 	${SOURCES_ROOT}/mainwindow.ui
 	${SOURCES_ROOT}/connectdialog.ui
     ${SOURCES_ROOT}/rundialog.ui
