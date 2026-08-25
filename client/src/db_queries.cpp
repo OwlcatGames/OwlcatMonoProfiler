@@ -16,6 +16,8 @@ namespace owlcat
         query_id_t id_select_last_good_size = "select_last_good_size";
         query_id_t id_insert_memstats = "insert_memstats";
         query_id_t id_select_memstats = "select_memstats";
+        query_id_t id_insert_gc_event = "insert_gc_event";
+        query_id_t id_select_gc_events = "select_gc_events";
         query_id_t id_insert_module = "insert_module";
         query_id_t id_select_modules = "select_modules";
 
@@ -79,6 +81,21 @@ namespace owlcat
         cursor_t select_memstats(db_t& db, uint64_t from_frame, uint64_t to_frame)
         {
             return db.query_data(queries::id_select_memstats, { {"from", from_frame}, {"to", to_frame} });
+        }
+
+        bool insert_gc_event(db_t& db, uint64_t frame, uint64_t freed_objects, uint64_t freed_bytes)
+        {
+            return db.query(queries::id_insert_gc_event,
+                {
+                    {"frame", frame},
+                    {"freed_objects", freed_objects},
+                    {"freed_bytes", freed_bytes},
+                });
+        }
+
+        cursor_t select_gc_events(db_t& db, uint64_t from_frame, uint64_t to_frame)
+        {
+            return db.query_data(queries::id_select_gc_events, { {"from", from_frame}, {"to", to_frame} });
         }
 
         cursor_t select_types(db_t& db)
@@ -180,6 +197,17 @@ namespace owlcat
                 "INSERT OR REPLACE INTO MemStats (frame, working_set, committed, gc_heap)"
                 "VALUES ($frame, $working_set, $committed, $gc_heap)"
             );
+            register_query(queries::id_insert_gc_event,
+                "INSERT OR REPLACE INTO GcEvents (frame, freed_objects, freed_bytes)"
+                "VALUES ($frame, $freed_objects, $freed_bytes)"
+            );
+            register_query(queries::id_select_gc_events,
+                "SELECT frame, freed_objects, freed_bytes "
+                "FROM GcEvents "
+                "WHERE frame >= $from AND frame <= $to "
+                "ORDER BY frame"
+            );
+
             register_query(queries::id_select_memstats,
                 "SELECT frame, working_set, committed, gc_heap "
                 "FROM MemStats "

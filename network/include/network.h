@@ -42,6 +42,12 @@ namespace owlcat
 			// symbol search path. Sent once per module, before the first frame line that
 			// references it.
 			SRV_MODULE,
+
+			// One managed collection: the frame it ended on, and what the pseudo-GC
+			// swept. Sent once per GC, so the client never has to guess a collection
+			// from free counts - native captures free explicitly on nearly every
+			// frame, which makes any such guess useless.
+			SRV_GC,
 		};
 
 		enum command

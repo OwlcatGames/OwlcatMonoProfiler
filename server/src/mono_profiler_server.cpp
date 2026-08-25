@@ -345,6 +345,22 @@ namespace owlcat
 				return m_network.get_pending_write_bytes();
 			}
 
+			virtual void report_gc(uint64_t frame, uint64_t freed_objects, uint64_t freed_bytes) override
+			{
+				if (!m_network.is_connected())
+					return;
+
+				static std::vector<uint8_t> data;
+				data.reserve(32);
+				data.clear();
+				memory_writer writer(data);
+				writer.write_uint64(frame);
+				writer.write_uint64(freed_objects);
+				writer.write_uint64(freed_bytes);
+
+				m_network.write_message(protocol::message::SRV_GC, (uint32_t)data.size(), (uint8_t*)&data[0]);
+			}
+
 			virtual void report_memstats(uint64_t frame, uint64_t working_set, uint64_t committed, uint64_t gc_heap) override
 			{
 				if (!m_network.is_connected())

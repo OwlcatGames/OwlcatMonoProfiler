@@ -57,6 +57,8 @@ class live_objects_by_type_model : public QAbstractTableModel
     };
     std::vector<row_data> m_rows;
     uint64_t m_total_size = 0;
+    // Largest single row, for the proportional bars in the Size column
+    uint64_t m_max_size = 0;
 
 public:
     enum role
@@ -78,6 +80,7 @@ public:
     void clear();
 
     uint64_t get_total_size() const { return m_total_size; }
+    uint64_t get_max_size() const { return m_max_size; }
     QModelIndex find_type(uint64_t type) const;
 };
 
@@ -110,6 +113,8 @@ private:
     };
     std::vector<row_data> m_rows;
     uint64_t m_total_size = 0;
+    // Largest single row, for the proportional bars in the Size column
+    uint64_t m_max_size = 0;
 public:
     void init(live_objects_data* data);
 
@@ -126,6 +131,7 @@ public:
     void clear();
 
     uint64_t get_total_size() const { return m_total_size; }
+    uint64_t get_max_size() const { return m_max_size; }
     QModelIndex find_callstack(uint64_t callstack) const;
 
     const std::vector<uint64_t>* get_addresses(const QModelIndex& index);

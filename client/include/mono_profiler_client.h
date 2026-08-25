@@ -36,6 +36,14 @@ namespace owlcat
 	/*
 		Symbol resolution status of one native module referenced by callstack frames
 	*/
+	// One managed collection: what the pseudo-GC swept on the frame it ended on
+	struct gc_event_t
+	{
+		uint64_t frame = 0;
+		uint64_t freed_objects = 0;
+		uint64_t freed_bytes = 0;
+	};
+
 	struct symbol_module_status
 	{
 		enum class state
@@ -210,6 +218,11 @@ namespace owlcat
 		// Per-frame whole-process memory (committed/working-set/GC-heap bytes), aligned like
 		// get_frame_stats' size_points. Empty for captures made before this was added.
 		void get_memory_series(std::vector<uint64_t>& committed_points, std::vector<uint64_t>& working_set_points, std::vector<uint64_t>& gc_heap_points, uint64_t& max_committed, uint64_t from_frame, uint64_t to_frame);
+
+		// Managed collections in the frame range, as reported by the server (SRV_GC).
+		// Empty for a capture recorded before GC events existed, or for a native-only
+		// capture - there is nothing to infer from, so the caller shows no marks.
+		void get_gc_events(std::vector<gc_event_t>& events, uint64_t from_frame, uint64_t to_frame);
 		// Returns a list of live objects for the specified timeframe
 		void get_live_objects(std::vector<live_object>& objects, int from, int to, progress_func_t progress_func);
 		// Returns a name for type ID

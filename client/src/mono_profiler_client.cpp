@@ -1039,6 +1039,19 @@ namespace owlcat
 					else
 						printf("Received module definition, but msg is broken\n");
 				}
+				else if (msg.header.type == protocol::message::SRV_GC)
+				{
+					uint64_t frame, freed_objects, freed_bytes;
+					bool all_ok =
+						reader.read_uint64(frame) &&
+						reader.read_uint64(freed_objects) &&
+						reader.read_uint64(freed_bytes);
+
+					if (all_ok)
+						queries::insert_gc_event(m_db, frame, freed_objects, freed_bytes);
+					else
+						printf("Received gc event, but msg is broken\n");
+				}
 				else if (msg.header.type == protocol::message::SRV_MEMSTATS)
 				{
 					uint64_t frame, working_set, committed, gc_heap;
@@ -1642,6 +1655,21 @@ public:
 		// Per-frame whole-process memory (committed, working set, GC heap). Aligned exactly like
 		// get_stats' size_points (one entry per frame in [from,to], gaps carried forward), so the
 		// UI can overlay it on the size graph. Empty for captures that predate MemStats.
+		void get_gc_events(std::vector<gc_event_t>& events, uint64_t from_frame, uint64_t to_frame)
+		{
+			events.clear();
+
+			auto result = queries::select_gc_events(m_db, from_frame, to_frame);
+			while (result.next())
+			{
+				gc_event_t event;
+				event.frame = result.get_uint64("frame");
+				event.freed_objects = result.get_uint64("freed_objects");
+				event.freed_bytes = result.get_uint64("freed_bytes");
+				events.push_back(event);
+			}
+		}
+
 		void get_memory_series(std::vector<uint64_t>& committed_points, std::vector<uint64_t>& working_set_points, std::vector<uint64_t>& gc_heap_points, uint64_t& max_committed, uint64_t from_frame, uint64_t to_frame)
 		{
 			committed_points.clear();
@@ -1904,6 +1932,11 @@ public:
 	void mono_profiler_client_data::get_memory_series(std::vector<uint64_t>& committed_points, std::vector<uint64_t>& working_set_points, std::vector<uint64_t>& gc_heap_points, uint64_t& max_committed, uint64_t from_frame, uint64_t to_frame)
 	{
 		m_source->get_memory_series(committed_points, working_set_points, gc_heap_points, max_committed, from_frame, to_frame);
+	}
+
+	void mono_profiler_client_data::get_gc_events(std::vector<gc_event_t>& events, uint64_t from_frame, uint64_t to_frame)
+	{
+		m_source->get_gc_events(events, from_frame, to_frame);
 	}
 
 	void mono_profiler_client_data::get_live_objects(std::vector<live_object>& objects, int from, int to, progress_func_t progress_func)

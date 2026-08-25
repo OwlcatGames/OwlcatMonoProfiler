@@ -181,7 +181,7 @@ namespace owlcat
 
 		// alloc/free are Mono events (managed by the pseudo-GC); native_alloc/native_free
 		// come from hooked native allocators and are freed explicitly (never GC-swept).
-		enum class work_item_type : uint8_t {alloc, free, native_alloc, native_free};
+		enum class work_item_type : uint8_t {alloc, free, native_alloc, native_free, gc};
 		/*
 			A work item to be processed by worker thread
 		*/
@@ -198,6 +198,9 @@ namespace owlcat
 			uint32_t size;
 			// Index into the native type labels, for native_alloc events (see set_native_types)
 			uint32_t native_type = 0;
+			// For gc events: what the pseudo-GC swept on this pass
+			uint64_t gc_freed_objects = 0;
+			uint64_t gc_freed_bytes = 0;
 			// Callstack at which object was allocated (empty for free events)
 			stack_backtrace backtrace;
 			// Type of event

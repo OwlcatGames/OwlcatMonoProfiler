@@ -76,6 +76,23 @@ namespace owlcat
             }
         },
         //----------------------------------------------------------------
+        // Managed collections (see SRV_GC): one row per pseudo-GC, with what it swept.
+        // A collection is an event the server knows about, not something to infer from
+        // per-frame free counts - a native capture frees explicitly on nearly every
+        // frame, which makes any such inference useless.
+        {
+            "Add GcEvents table",
+            {
+                {
+                    "CREATE TABLE GcEvents("
+                    "frame INTEGER PRIMARY KEY NOT NULL,"
+                    "freed_objects INT NOT NULL,"
+                    "freed_bytes INT NOT NULL"
+                    ")"
+                },
+            }
+        },
+        //----------------------------------------------------------------
         // Identities of native modules referenced by callstack frames (see SRV_MODULE):
         // the module's full path in the target process and its PDB signature (RSDS
         // GUID+age+path, GUID as 32 hex chars). Persisted so symbolication of a saved

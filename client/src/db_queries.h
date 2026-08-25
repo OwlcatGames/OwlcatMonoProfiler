@@ -31,6 +31,10 @@ namespace owlcat
         // Per-frame whole-process memory snapshot (see SRV_MEMSTATS)
         bool insert_memstats(db_t& db, uint64_t frame, uint64_t working_set, uint64_t committed, uint64_t gc_heap);
         cursor_t select_memstats(db_t& db, uint64_t from_frame, uint64_t to_frame);
+
+        // Managed collections (SRV_GC), one row per GC
+        bool insert_gc_event(db_t& db, uint64_t frame, uint64_t freed_objects, uint64_t freed_bytes);
+        cursor_t select_gc_events(db_t& db, uint64_t from_frame, uint64_t to_frame);
         cursor_t select_types(db_t& db);
         cursor_t select_callstacks(db_t& db);
         // Native module identities (see SRV_MODULE); pdb_guid is 32 hex chars

@@ -5,6 +5,7 @@
 #include "symbols_dialog.h"
 #include "theme.h"
 #include "icons.h"
+#include "size_bar_delegate.h"
 #include <qsettings.h>
 #include "qwt_point_data.h"
 #include "qwt_picker_machine.h"
@@ -27,6 +28,7 @@
 #include <qtoolbar.h>
 #include <qstatusbar.h>
 #include <qlabel.h>
+#include <qlocale.h>
 #include <qmenu.h>
 #include <qactiongroup.h>
 #include <qshortcut.h>
@@ -517,6 +519,7 @@ void main_window::onOpenData()
 void main_window::finishOpenData()
 {
     syncAxisExtents();
+    refreshEventsStrip();
     m_is_db_temporary = false;
 
     m_data->clear();
@@ -873,11 +876,13 @@ void main_window::setupChrome()
     });
 
     buildLegend();
+    setupPlotPanel();
 
     // Symbolication happens on a background thread whether or not a capture is
     // being recorded, so this ticks independently of the profiling timer
     connect(&m_chrome_timer, &QTimer::timeout, this, &main_window::refreshSymbolsIndicator);
     connect(&m_chrome_timer, &QTimer::timeout, this, &main_window::syncAxisExtents);
+    connect(&m_chrome_timer, &QTimer::timeout, this, &main_window::refreshEventsStrip);
     m_chrome_timer.start(1500);
     refreshSymbolsIndicator();
 }
@@ -917,6 +922,7 @@ void main_window::refreshSymbolsIndicator()
 void main_window::onAllocationsScrolled(int value)
 {
     syncAxisExtents();
+    refreshEventsStrip();
     m_pos = value;
     setZoom(m_zoom);
 }
@@ -1086,6 +1092,9 @@ void main_window::onPickerChanged(const QPolygon& selection)
 
     m_allocationsZone.setInterval(first_frame, last_frame + 1);
     m_sizeZone.setInterval(first_frame, last_frame + 1);
+    if (m_events_strip != nullptr)
+        m_events_strip->set_selection(first_frame, last_frame);
+    updateSelectionSummary(first_frame, last_frame);
 
     calculateLiveObjects(first_frame, last_frame);
 }
@@ -1415,6 +1424,7 @@ void main_window::setupTableStyle()
 void main_window::setZoom(float new_zoom)
 {
     syncAxisExtents();
+    refreshEventsStrip();
     m_zoom = new_zoom;
     if (m_zoom <= 0.02f)
         m_zoom = 0.02f;
@@ -1717,6 +1727,11 @@ void main_window::buildLegend()
         layout->addWidget(item);
     }
 
+    // How many collections the capture holds at all - three in a 27 000-frame
+    // session is normal, and without this the empty strip looks broken
+    m_events_label = new QLabel(m_legend);
+    layout->addWidget(m_events_label);
+
     layout->addStretch();
 
     // Selection summary: the frame range every table below is computed from,
@@ -1799,4 +1814,126 @@ void main_window::syncAxisExtents()
         if (auto* legend_layout = qobject_cast<QHBoxLayout*>(m_legend->layout()))
             legend_layout->setContentsMargins((int)extent + 2, 2, 6, 2);
     }
+}
+
+/*
+    One instrument instead of two charts: memory on top, the events strip, then
+    allocations per frame, with a single X axis label row at the bottom. Both
+    plots keep their own Y scale (see doc: the allocation bars must never be
+    able to reach the heap curve), and syncAxisExtents keeps the canvases
+    starting at the same x.
+*/
+void main_window::setupPlotPanel()
+{
+    auto* layout = m_ui->verticalLayout;
+
+    // Memory is the primary signal, so it goes first; the legend is already at 0
+    layout->removeWidget(m_ui->sizeGraph);
+    layout->insertWidget(1, m_ui->sizeGraph);
+
+    // The allocations plot keeps the visible X axis, so its scale map is the one
+    // Qwt definitely keeps current; both canvases start at the same x anyway
+    m_events_strip = new events_strip(m_ui->allocationsGraph, this);
+    m_events_strip->setToolTip(tr("GC events and instrumented markers"));
+    layout->insertWidget(2, m_events_strip);
+
+    // Order is now: legend, memory, events, allocations, scrollbar, snap row
+    layout->setStretch(0, 0);
+    layout->setStretch(1, 1);
+    layout->setStretch(2, 0);
+    layout->setStretch(3, 1);
+    layout->setStretch(4, 0);
+    layout->setStretch(5, 0);
+
+    // One X axis for the pair: the top plot keeps its scale (the pickers and the
+    // strip map through it) but stops drawing a second row of tick labels
+    m_ui->sizeGraph->enableAxis(QwtPlot::xBottom, false);
+
+    // Clicking an event moves the selection to that frame
+    connect(m_events_strip, &events_strip::frameClicked, this, [this](qint64 frame)
+    {
+        const int f = (int)frame;
+        m_allocationsZone.setInterval(f, f + 1);
+        m_sizeZone.setInterval(f, f + 1);
+        m_events_strip->set_selection(f, f);
+        updateSelectionSummary(f, f);
+        calculateLiveObjects(f, f);
+    });
+
+    // ---- size bars in the Size column ----
+
+    // The bar shows each row's share of the total in view, not its size relative
+    // to the biggest row (which only ever said "this one is the largest")
+    m_types_size_bar = new size_bar_delegate(live_objects_by_type_model::role::Size, this);
+    m_types_size_bar->set_total_provider([this]() { return (quint64)m_live_objects_by_type_model.get_total_size(); });
+    m_ui->liveObjectsList->setItemDelegateForColumn(2, m_types_size_bar);
+
+    m_callstacks_size_bar = new size_bar_delegate(live_callstacks_by_type_model::role::Size, this);
+    m_callstacks_size_bar->set_total_provider([this]() { return (quint64)m_live_callstack_by_type_model.get_total_size(); });
+    m_ui->callstacksList->setItemDelegateForColumn(2, m_callstacks_size_bar);
+}
+
+void main_window::refreshEventsStrip()
+{
+    if (m_events_strip == nullptr || !m_data)
+        return;
+
+    const auto& t = theme::tokens();
+
+    std::vector<events_strip::event_mark> events;
+    for (const auto& gc : m_data->get_gc_events())
+    {
+        QString name = tr("GC - frame %1 - %2 objects, %3 freed")
+            .arg(gc.frame)
+            .arg(QLocale().toString((qulonglong)gc.freed_objects))
+            .arg(size_to_string((double)gc.freed_bytes));
+
+        events.push_back({ (int64_t)gc.frame, name, t.series_gc, events_strip::shape::diamond });
+    }
+
+    // Instrumented markers (SRV_MARKER) will be appended here with their own
+    // shape and colour once the server can report them
+
+    std::vector<double> gc_frames;
+    gc_frames.reserve(events.size());
+    for (const auto& mark : events)
+        gc_frames.push_back((double)mark.frame + 0.5);
+
+    m_size_markers.update(m_ui->sizeGraph, gc_frames, t.series_gc);
+    m_allocations_markers.update(m_ui->allocationsGraph, gc_frames, t.series_gc);
+
+    if (m_events_label != nullptr)
+    {
+        m_events_label->setText(events.empty()
+            ? tr("no GC events in this capture")
+            : tr("%1 GC event(s)").arg(events.size()));
+    }
+
+    m_events_strip->set_events(std::move(events));
+}
+
+void main_window::updateSelectionSummary(int first_frame, int last_frame)
+{
+    if (m_selection_label == nullptr)
+        return;
+
+    QString summary = tr("frames %1-%2  %3 frames")
+        .arg(first_frame).arg(last_frame).arg(last_frame - first_frame + 1);
+
+    // How much the tracked total moved across the selection - the number the
+    // range was probably selected to find out
+    const size_t sizes = m_data ? m_data->get_sizes_size() : 0;
+    if (sizes > 0)
+    {
+        const int64_t base = m_data->first_visible_frame;
+        const auto index_of = [&](int frame) -> uint64_t
+        {
+            return (uint64_t)qBound<int64_t>(0, (int64_t)frame - base, (int64_t)sizes - 1);
+        };
+
+        const double delta = m_data->get_size(index_of(last_frame)).y() - m_data->get_size(index_of(first_frame)).y();
+        summary += QString("  %1%2").arg(delta < 0 ? "-" : "+").arg(size_to_string(qAbs(delta)));
+    }
+
+    m_selection_label->setText(summary);
 }

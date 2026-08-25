@@ -189,6 +189,17 @@ QScrollBar::handle:hover      { background: @scroll_hi@; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 
+/* The graph navigator is not a scrollbar you glance past - it is how you move
+   through the capture, so it gets a visible track and an accent-tinted grip */
+QScrollBar:horizontal#horizontalScrollBar
+                        { background: @plot_bg@; border: 1px solid @border@; border-radius: 5px;
+                          height: 16px; margin: 2px 0; }
+QScrollBar::handle:horizontal#horizontalScrollBar
+                        { background: @nav_grip@; border: 1px solid @nav_grip_border@;
+                          border-radius: 4px; min-width: 44px; margin: 1px; }
+QScrollBar::handle:horizontal#horizontalScrollBar:hover
+                        { background: @nav_grip_hover@; border-color: @accent@; }
+
 QSplitter::handle       { background: @window@; }
 QSplitter::handle:horizontal { width: 7px; }
 QSplitter::handle:vertical   { height: 7px; }
@@ -206,8 +217,20 @@ QFrame[frameShape="4"], QFrame[frameShape="5"] { color: @border@; }
         QColor accent_bg2 = t.dark ? t.accent_bg.lighter(130) : t.accent_bg.darker(104);
         QColor sel_bg     = t.dark ? QColor("#2b3138") : QColor("#e6ebf6");
         QColor row_line   = t.dark ? QColor("#22262c") : QColor("#f2efe9");
-        QColor scroll     = t.dark ? QColor("#333941") : QColor("#d7d2c8");
-        QColor scroll_hi  = t.dark ? QColor("#454d57") : QColor("#c3bdb1");
+        QColor scroll     = t.dark ? QColor("#3d444e") : QColor("#c9c3b8");
+        QColor scroll_hi  = t.dark ? QColor("#525a66") : QColor("#b0a99c");
+
+        // Accent blended towards the panel: clearly the active control, without
+        // shouting louder than the curves it sits under
+        const auto blend = [](const QColor& a, const QColor& b, double k)
+        {
+            return QColor((int)(a.red()   * (1 - k) + b.red()   * k),
+                          (int)(a.green() * (1 - k) + b.green() * k),
+                          (int)(a.blue()  * (1 - k) + b.blue()  * k));
+        };
+        QColor nav_grip        = blend(t.panel_hi, t.accent, t.dark ? 0.45 : 0.30);
+        QColor nav_grip_border = blend(t.panel_hi, t.accent, t.dark ? 0.75 : 0.55);
+        QColor nav_grip_hover  = blend(t.panel_hi, t.accent, t.dark ? 0.70 : 0.45);
 
         QString qss = QString::fromUtf8(tpl);
         qss.replace("@window@",           hex(t.window));
@@ -231,6 +254,9 @@ QFrame[frameShape="4"], QFrame[frameShape="5"] { color: @border@; }
         qss.replace("@row_line@",         hex(row_line));
         qss.replace("@scroll_hi@",        hex(scroll_hi));
         qss.replace("@scroll@",           hex(scroll));
+        qss.replace("@nav_grip_border@",  hex(nav_grip_border));
+        qss.replace("@nav_grip_hover@",   hex(nav_grip_hover));
+        qss.replace("@nav_grip@",         hex(nav_grip));
         return qss;
     }
 }

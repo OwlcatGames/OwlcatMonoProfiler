@@ -16,6 +16,7 @@
 
 #include "mono_profiler_client.h"
 #include "band_picker.h"
+#include "events_strip.h"
 #include "byte_scale_draw.h"
 #include "graphs_data.h"
 #include "live_objects_data.h"
@@ -52,16 +53,45 @@ public:
     }
 };
 
+/*
+    Pool of vertical event lines drawn inside a plot's canvas. Qwt maps the frame
+    number to pixels itself, so these land exactly on the frame whatever the axis
+    layout does - the events strip above the plots is the same information in a
+    place where it can be hovered.
+*/
 class markers
 {
 private:
     std::vector<std::shared_ptr<QwtPlotMarker>> m_pool;
-    std::vector<std::shared_ptr<QwtPlotMarker>> m_active_markers;
+    QwtPlot* m_plot = nullptr;
 
 public:
-    void update(std::vector<QPointF> points)
+    // frames: X positions in axis coordinates. Reuses items across calls, so this
+    // is cheap enough to run on every replot.
+    void update(QwtPlot* plot, const std::vector<double>& frames, const QColor& color)
     {
+        m_plot = plot;
 
+        while (m_pool.size() < frames.size())
+        {
+            auto marker = std::make_shared<QwtPlotMarker>();
+            marker->setLineStyle(QwtPlotMarker::VLine);
+            marker->setZ(1);   // above the grid, below the curves
+            marker->attach(plot);
+            m_pool.push_back(marker);
+        }
+
+        QPen pen(color, 1.0, Qt::DashLine);
+        for (size_t i = 0; i < m_pool.size(); ++i)
+        {
+            const bool used = i < frames.size();
+            m_pool[i]->setVisible(used);
+            if (!used)
+                continue;
+
+            m_pool[i]->setLinePen(pen);
+            m_pool[i]->setXValue(frames[i]);
+        }
     }
 };
 
@@ -147,6 +177,13 @@ private:
     void setupTableStyle();
     // Keeps the two plots' canvases starting at the same x (shared X axis)
     void syncAxisExtents();
+    // Stacks the plots into one instrument: memory on top, events strip, then
+    // allocations, with a single X axis label row at the bottom
+    void setupPlotPanel();
+    // Pushes the visible range's GC events into the strip
+    void refreshEventsStrip();
+    // "frames 640-902 - 263 frames - +184.6Mb" above the plots
+    void updateSelectionSummary(int first_frame, int last_frame);
     // Compact legend row above the plots, replacing Qwt's own top legend
     void buildLegend();
     void updateLegendColors();
@@ -166,7 +203,9 @@ private:
     QwtPlotZoneItem m_allocationsZone;
     QwtPlotZoneItem m_sizeZone;
 
-    markers m_markers;
+    // GC lines inside the two canvases (one pool per plot)
+    markers m_size_markers;
+    markers m_allocations_markers;
 
     QScopedPointer<QHBoxLayout> m_live_objects_types_progress_layout;
     QScopedPointer<QProgressBar> m_live_objects_types_progress;
@@ -216,6 +255,10 @@ private:
     QLabel*      m_status_symbols = nullptr;
     QWidget*     m_legend = nullptr;
     QLabel*      m_selection_label = nullptr;
+    QLabel*      m_events_label = nullptr;
+    events_strip* m_events_strip = nullptr;
+    class size_bar_delegate* m_types_size_bar = nullptr;
+    class size_bar_delegate* m_callstacks_size_bar = nullptr;
     // Drives refreshSymbolsIndicator() while the app is idle as well as while
     // profiling (symbolication runs on a background thread either way)
     QTimer       m_chrome_timer;

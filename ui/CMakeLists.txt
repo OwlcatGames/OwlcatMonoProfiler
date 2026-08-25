@@ -23,6 +23,10 @@ set( ALL_SOURCES
     ${SOURCES_ROOT}/theme.cpp
 	${SOURCES_ROOT}/icons.h
     ${SOURCES_ROOT}/icons.cpp
+	${SOURCES_ROOT}/events_strip.h
+    ${SOURCES_ROOT}/events_strip.cpp
+	${SOURCES_ROOT}/size_bar_delegate.h
+    ${SOURCES_ROOT}/size_bar_delegate.cpp
 	${SOURCES_ROOT}/mainwindow.ui
 	${SOURCES_ROOT}/connectdialog.ui
     ${SOURCES_ROOT}/rundialog.ui

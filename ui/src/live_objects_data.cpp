@@ -136,6 +136,7 @@ void live_objects_by_type_model::update()
     {
         m_rows.push_back({ t.type, t.count, t.size });
         m_total_size += t.size;
+        m_max_size = std::max(m_max_size, t.size);
     }
 
     endInsertRows();
@@ -147,6 +148,7 @@ void live_objects_by_type_model::update()
 void live_objects_by_type_model::clear()
 {
     m_total_size = 0;
+    m_max_size = 0;
 
     if (m_rows.empty())
         return;
@@ -308,12 +310,16 @@ void live_callstacks_by_type_model::update(uint64_t type, owlcat::progress_func_
     beginInsertRows(QModelIndex(), 0, (int)rows.size() - 1);
     m_rows = std::move(rows);
     m_total_size = total_size;
+    m_max_size = 0;
+    for (const auto& row : m_rows)
+        m_max_size = std::max(m_max_size, row.size);
     endInsertRows();
 }
 
 void live_callstacks_by_type_model::clear()
 {
     m_total_size = 0;
+    m_max_size = 0;
 
     if (m_rows.empty())
         return;

@@ -949,6 +949,13 @@ namespace owlcat
 				continue;
 			}
 
+			// A collection finished: everything it swept has just been reported
+			if (item.type == work_item_type::gc)
+			{
+				m_events_sink->report_gc(item.frame, item.gc_freed_objects, item.gc_freed_bytes);
+				continue;
+			}
+
 			// 1. ---------- Intern type and callstack. Names are resolved and definitions are
 			// reported to client only for types and callstacks seen for the first time;
 			// afterwards, it's a single hash lookup.
@@ -1193,6 +1200,9 @@ namespace owlcat
 		profiler_internal_scope internal_scope;
 
 		int iterations = 0;
+		// What this pass swept, reported to the client as one SRV_GC below
+		uint64_t swept_count = 0;
+		uint64_t swept_bytes = 0;
 
 		std::scoped_lock gc_lock(m_gc_mutex);
 		std::scoped_lock roots_lock(m_roots_mutex);
@@ -1304,6 +1314,7 @@ namespace owlcat
 					item.size = iter->second.size;
 					m_work_items.enqueue(m_work_items_token, item);
 
+					++swept_count; swept_bytes += iter->second.size;
 #if defined(OWLCAT_PROFILER_MEMLOG)
 					++freed_count; freed_bytes += iter->second.size;
 #endif
@@ -1331,6 +1342,21 @@ namespace owlcat
 			m_last_gc_used_bytes = mono_functions::gc_get_used_size.is_valid()
 				? (int64_t)mono_functions::gc_get_used_size() : -1;
 #endif
+		}
+
+		// The collection itself is an event: post it after the frees it produced,
+		// through the same queue, so the client does not have to infer it
+		if (!only_update_parents)
+		{
+			work_item gc_item;
+			gc_item.type = work_item_type::gc;
+			gc_item.frame = frame;
+			gc_item.klass = nullptr;
+			gc_item.obj = nullptr;
+			gc_item.size = 0;
+			gc_item.gc_freed_objects = swept_count;
+			gc_item.gc_freed_bytes = swept_bytes;
+			m_work_items.enqueue(m_work_items_token, gc_item);
 		}
 
 		// Parents are now up to date with the object graph as of this pass

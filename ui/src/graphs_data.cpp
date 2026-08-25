@@ -1,5 +1,8 @@
 #include "graphs_data.h"
 
+#include <algorithm>
+#include <cstdint>
+
 graphs_data::graphs_data(owlcat::mono_profiler_client* client)
     : m_data(client->get_data())
 {
@@ -24,6 +27,7 @@ void graphs_data::clear()
     m_committed_points.clear();
     m_working_set_points.clear();
     m_gc_heap_points.clear();
+    m_gc_events.clear();
     first_visible_frame = -1;
     last_visible_frame = -1;
 }
@@ -39,6 +43,8 @@ void graphs_data::update_region(int from, int to)
     last_visible_frame = to;
     m_data->get_frame_stats(m_alloc_count, m_frees_count, max_allocs, max_frees, m_size_points, max_size, from, to);
     m_data->get_memory_series(m_committed_points, m_working_set_points, m_gc_heap_points, max_committed, from, to);
+    // Whole capture, not [from, to]: see get_gc_events()
+    m_data->get_gc_events(m_gc_events, min_frame, max_frame);
 }
 
 size_t graphs_data::get_allocations_count_size() { return m_alloc_count.size(); }
@@ -80,6 +86,26 @@ QPointF graphs_data::get_committed(uint64_t frame)
 
 uint64_t graphs_data::get_closest_gc_frame(uint64_t frame) const
 {
+    // Prefer real collections: "a frame with frees" matches almost every frame of
+    // a native capture (26 272 of 26 283 in one measured session), which made
+    // snapping a no-op there
+    if (!m_gc_events.empty())
+    {
+        uint64_t best = frame;
+        uint64_t best_distance = UINT64_MAX;
+        for (const auto& gc : m_gc_events)
+        {
+            const uint64_t distance = gc.frame > frame ? gc.frame - frame : frame - gc.frame;
+            if (distance < best_distance)
+            {
+                best_distance = distance;
+                best = gc.frame;
+            }
+        }
+        return best;
+    }
+
+
     if (frame <= first_visible_frame || frame >= last_visible_frame)
         return frame;
 
