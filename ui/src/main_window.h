@@ -6,6 +6,7 @@
 #include <qprogressbar.h>
 #include <qboxlayout.h>
 #include <qtableview.h>
+#include <qsplitter.h>
 #include <qthread.h>
 #include <qelapsedtimer.h>
 #include <qtimer.h>
@@ -17,6 +18,7 @@
 #include "mono_profiler_client.h"
 #include "band_picker.h"
 #include "events_strip.h"
+#include "callstack_inspector.h"
 #include "byte_scale_draw.h"
 #include "graphs_data.h"
 #include "live_objects_data.h"
@@ -118,9 +120,14 @@ public slots:
     void onStopProfiling();
     // Both Settings menu items and the toolbar button open the one Symbols window
     void onShowSymbols();
+    void onShowRuntimeFrames();
     void onThemeChanged();
     void onAllocationsScrolled(int);    
     void onLiveObjectTypeSelected(const QItemSelection& selected, const QItemSelection& deselected);
+    // Feeds the inspector pane from the selected callstack row
+    void onLiveObjectCallstackSelected(const QItemSelection& selected, const QItemSelection& deselected);
+    // "Find references" for whatever callstack row is current (menu + inspector)
+    void findReferencesForCurrentCallstack();
     void onSearchTypeSelected(const QItemSelection& selected, const QItemSelection& deselected);
     void onPickerChanged(const QPolygon& selection);
     void onLiveObjectsCallstacksContextMenuRequested(QPoint point);
@@ -175,6 +182,8 @@ private:
     void setupChrome();
     void setupPlotStyle();
     void setupTableStyle();
+    // Types / callstacks / inspector as draggable panes (was fixed grid columns)
+    void setupLiveObjectsPanes();
     // Keeps the two plots' canvases starting at the same x (shared X axis)
     void syncAxisExtents();
     // Stacks the plots into one instrument: memory on top, events strip, then
@@ -247,6 +256,8 @@ private:
 
     // Modeless Symbols window (paths + per-module status); created on first use
     symbols_dialog* m_symbols_dialog = nullptr;
+    // Modeless editor for the runtime-frame pattern list
+    class runtime_frames_dialog* m_runtime_frames_dialog = nullptr;
 
     // Toolbar/status-bar chrome created in setupChrome()
     QToolButton* m_symbols_button = nullptr;
@@ -254,9 +265,12 @@ private:
     QLabel*      m_capture_mode_label = nullptr;
     QLabel*      m_status_symbols = nullptr;
     QWidget*     m_legend = nullptr;
+    QSplitter*   m_live_splitter = nullptr;
     QLabel*      m_selection_label = nullptr;
     QLabel*      m_events_label = nullptr;
     events_strip* m_events_strip = nullptr;
+    callstack_inspector* m_callstack_inspector = nullptr;
+    class callstack_delegate* m_callstack_delegate = nullptr;
     class size_bar_delegate* m_types_size_bar = nullptr;
     class size_bar_delegate* m_callstacks_size_bar = nullptr;
     // Drives refreshSymbolsIndicator() while the app is idle as well as while

@@ -194,6 +194,14 @@ QVariant live_callstacks_by_type_model::data(const QModelIndex& index, int role)
                                    : QVariant(Qt::AlignRight | Qt::AlignVCenter);
     }
 
+    if (role == Qt::ToolTipRole && index.column() == 0)
+    {
+        const int row = index.row();
+        if (row < 0 || row >= (int)m_rows.size())
+            return QVariant();
+        return QString::fromStdString(m_data->get_callstack(m_rows[row].callstack));
+    }
+
     if (role != Qt::DisplayRole && role != role::Callstack && role != role::Size && role != role::Lines)
         return QVariant();
 
@@ -207,7 +215,11 @@ QVariant live_callstacks_by_type_model::data(const QModelIndex& index, int role)
     if (role == role::Size)
         return (qulonglong)m_rows[row].size;
     if (role == role::Lines)
-        return m_rows[row].lines;
+    {
+        // The table draws two fixed lines per row (callstack_delegate) and the
+        // full stack lives in the inspector, so every row is the same height
+        return std::min(2, m_rows[row].lines);
+    }
 
     if (col == 0)
         return QString::fromStdString(m_data->get_callstack(m_rows[row].callstack));

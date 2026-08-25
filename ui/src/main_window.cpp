@@ -6,6 +6,9 @@
 #include "theme.h"
 #include "icons.h"
 #include "size_bar_delegate.h"
+#include "callstack_delegate.h"
+#include "frame_classifier.h"
+#include "runtime_frames_dialog.h"
 #include <qsettings.h>
 #include "qwt_point_data.h"
 #include "qwt_picker_machine.h"
@@ -28,6 +31,7 @@
 #include <qtoolbar.h>
 #include <qstatusbar.h>
 #include <qlabel.h>
+#include <qlineedit.h>
 #include <qlocale.h>
 #include <qmenu.h>
 #include <qactiongroup.h>
@@ -433,6 +437,9 @@ main_window::main_window(QWidget* parent) :
         const QByteArray splitter = settings.value("window/splitter").toByteArray();
         if (!splitter.isEmpty())
             m_ui->splitter->restoreState(splitter);
+        const QByteArray panes = settings.value("window/live_panes").toByteArray();
+        if (!panes.isEmpty() && m_live_splitter != nullptr)
+            m_live_splitter->restoreState(panes);
     }
 }
 
@@ -740,6 +747,24 @@ void main_window::onShowSymbols()
     m_symbols_dialog->activateWindow();
 }
 
+void main_window::onShowRuntimeFrames()
+{
+    if (m_runtime_frames_dialog == nullptr)
+    {
+        m_runtime_frames_dialog = new runtime_frames_dialog(this);
+        connect(m_runtime_frames_dialog, &runtime_frames_dialog::patternsChanged, this, [this]()
+        {
+            // Both the rows and the inspector are drawn from the classification
+            m_ui->callstacksList->viewport()->update();
+            onLiveObjectCallstackSelected(QItemSelection(), QItemSelection());
+        });
+    }
+
+    m_runtime_frames_dialog->show();
+    m_runtime_frames_dialog->raise();
+    m_runtime_frames_dialog->activateWindow();
+}
+
 void main_window::onThemeChanged()
 {
     auto* action = qobject_cast<QAction*>(sender());
@@ -836,6 +861,26 @@ void main_window::setupChrome()
         theme_group->addAction(action);
         connect(action, &QAction::triggered, this, &main_window::onThemeChanged);
     }
+
+    settings_menu->addSeparator();
+
+    // Every allocation stack ends in the allocator, so by default a row is
+    // labelled with the first frame of game code instead of the raw leaf
+    auto* attribute_action = settings_menu->addAction(tr("Attribute allocations to game code"));
+    attribute_action->setCheckable(true);
+    attribute_action->setChecked(frame_class::attribution_enabled());
+    attribute_action->setToolTip(tr("Label callstack rows with the first non-runtime frame "
+                                    "instead of the allocator frame every stack ends in"));
+    connect(attribute_action, &QAction::toggled, this, [this](bool on)
+    {
+        frame_class::set_attribution_enabled(on);
+        m_ui->callstacksList->viewport()->update();
+        onLiveObjectCallstackSelected(QItemSelection(), QItemSelection());
+    });
+
+    auto* runtime_frames_entry = settings_menu->addAction(tr("Runtime frames..."));
+    runtime_frames_entry->setToolTip(tr("Which frames count as allocator, runtime or engine plumbing"));
+    connect(runtime_frames_entry, &QAction::triggered, this, &main_window::onShowRuntimeFrames);
 
     settings_menu->addSeparator();
     auto* symbols_entry = settings_menu->addAction(icons::symbols(), tr("Symbols..."));
@@ -1126,6 +1171,11 @@ void main_window::onLiveObjectsMenuRequested(QPoint point)
 
 void main_window::onCallstackMenuAction(bool state)
 {
+    findReferencesForCurrentCallstack();
+}
+
+void main_window::findReferencesForCurrentCallstack()
+{
     auto currentIndex = m_ui->callstacksList->currentIndex();
     if (currentIndex == QModelIndex())
         return;
@@ -1287,6 +1337,8 @@ void main_window::closeEvent(QCloseEvent* ev)
     settings.setValue("window/geometry", saveGeometry());
     settings.setValue("window/state", saveState());
     settings.setValue("window/splitter", m_ui->splitter->saveState());
+    if (m_live_splitter != nullptr)
+        settings.setValue("window/live_panes", m_live_splitter->saveState());
 
     ev->accept();
 }
@@ -1868,9 +1920,82 @@ void main_window::setupPlotPanel()
     m_types_size_bar->set_total_provider([this]() { return (quint64)m_live_objects_by_type_model.get_total_size(); });
     m_ui->liveObjectsList->setItemDelegateForColumn(2, m_types_size_bar);
 
+    // Two fixed lines per callstack row; the whole stack goes to the inspector
+    m_callstack_delegate = new callstack_delegate(this);
+    m_ui->callstacksList->setItemDelegateForColumn(0, m_callstack_delegate);
+
+    m_callstack_inspector = new callstack_inspector(this);
+
+    connect(m_callstack_inspector, &callstack_inspector::findReferencesRequested,
+            this, &main_window::findReferencesForCurrentCallstack);
+    connect(m_ui->callstacksList->selectionModel(), &QItemSelectionModel::selectionChanged,
+            this, &main_window::onLiveObjectCallstackSelected);
+
     m_callstacks_size_bar = new size_bar_delegate(live_callstacks_by_type_model::role::Size, this);
     m_callstacks_size_bar->set_total_provider([this]() { return (quint64)m_live_callstack_by_type_model.get_total_size(); });
     m_ui->callstacksList->setItemDelegateForColumn(2, m_callstacks_size_bar);
+
+    setupLiveObjectsPanes();
+}
+
+/*
+    The tab's three panes - types, callstacks, callstack inspector - as a
+    QSplitter rather than fixed grid columns: how much room a callstack needs
+    depends on the capture (native frames with file and line are long), so the
+    ratio is the user's call. Sizes are remembered between sessions.
+*/
+void main_window::setupLiveObjectsPanes()
+{
+    const auto build_pane = [this](QLineEdit* filter, QTableView* table, QLabel* footer)
+    {
+        auto* pane = new QWidget(this);
+        auto* layout = new QVBoxLayout(pane);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(6);
+        // Adding to this layout reparents each widget out of the old grid
+        layout->addWidget(filter);
+        layout->addWidget(table, 1);
+        layout->addWidget(footer);
+        return pane;
+    };
+
+    QWidget* types_pane = build_pane(m_ui->typesFilter, m_ui->liveObjectsList, m_ui->liveObjectsSizeLabel);
+    QWidget* callstacks_pane = build_pane(m_ui->callstackFilter, m_ui->callstacksList, m_ui->callstacksSizeLabel);
+
+    m_live_splitter = new QSplitter(Qt::Horizontal, m_ui->liveObjectsTab);
+    m_live_splitter->setChildrenCollapsible(false);
+    m_live_splitter->setHandleWidth(7);
+    m_live_splitter->addWidget(types_pane);
+    m_live_splitter->addWidget(callstacks_pane);
+    m_live_splitter->addWidget(m_callstack_inspector);
+
+    // A callstack row and the inspector both need width; the type list needs least
+    types_pane->setMinimumWidth(220);
+    callstacks_pane->setMinimumWidth(280);
+    m_callstack_inspector->setMinimumWidth(260);
+    m_live_splitter->setStretchFactor(0, 26);
+    m_live_splitter->setStretchFactor(1, 44);
+    m_live_splitter->setStretchFactor(2, 30);
+
+    // setSizes() is in pixels, and the splitter has no width yet, so the first
+    // proportional split has to wait until it has been laid out. A saved state
+    // (restored in the constructor) overrides this.
+    QTimer::singleShot(0, this, [this]()
+    {
+        if (m_live_splitter == nullptr || m_live_splitter->width() <= 0)
+            return;
+        if (!QSettings().value("window/live_panes").toByteArray().isEmpty())
+            return;
+
+        const int width = m_live_splitter->width();
+        m_live_splitter->setSizes({ width * 26 / 100, width * 44 / 100, width * 30 / 100 });
+    });
+
+    // The grid is empty now that its children live in the panes
+    delete m_ui->liveObjectsTab->layout();
+    auto* tab_layout = new QVBoxLayout(m_ui->liveObjectsTab);
+    tab_layout->setContentsMargins(6, 6, 6, 6);
+    tab_layout->addWidget(m_live_splitter);
 }
 
 void main_window::refreshEventsStrip()
@@ -1936,4 +2061,28 @@ void main_window::updateSelectionSummary(int first_frame, int last_frame)
     }
 
     m_selection_label->setText(summary);
+}
+
+void main_window::onLiveObjectCallstackSelected(const QItemSelection& selected, const QItemSelection& deselected)
+{
+    if (m_callstack_inspector == nullptr)
+        return;
+
+    const QModelIndex current = m_ui->callstacksList->currentIndex();
+    if (!current.isValid())
+    {
+        m_callstack_inspector->clear_callstack();
+        return;
+    }
+
+    const QModelIndex source = m_live_callstack_by_type_filter_model.mapToSource(current);
+    const QModelIndex text_index = m_live_callstack_by_type_model.index(source.row(), 0);
+
+    const QString text = m_live_callstack_by_type_model.data(text_index, Qt::DisplayRole).toString();
+    const quint64 objects = m_live_callstack_by_type_model
+        .data(m_live_callstack_by_type_model.index(source.row(), 1), Qt::DisplayRole).toString().remove(QLocale().groupSeparator()).toULongLong();
+    const quint64 bytes = m_live_callstack_by_type_model
+        .data(text_index, live_callstacks_by_type_model::role::Size).toULongLong();
+
+    m_callstack_inspector->set_callstack(text, objects, bytes);
 }

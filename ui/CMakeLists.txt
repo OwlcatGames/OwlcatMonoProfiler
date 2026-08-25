@@ -27,6 +27,14 @@ set( ALL_SOURCES
     ${SOURCES_ROOT}/events_strip.cpp
 	${SOURCES_ROOT}/size_bar_delegate.h
     ${SOURCES_ROOT}/size_bar_delegate.cpp
+	${SOURCES_ROOT}/callstack_delegate.h
+    ${SOURCES_ROOT}/callstack_delegate.cpp
+	${SOURCES_ROOT}/callstack_inspector.h
+    ${SOURCES_ROOT}/callstack_inspector.cpp
+	${SOURCES_ROOT}/frame_classifier.h
+    ${SOURCES_ROOT}/frame_classifier.cpp
+	${SOURCES_ROOT}/runtime_frames_dialog.h
+    ${SOURCES_ROOT}/runtime_frames_dialog.cpp
 	${SOURCES_ROOT}/mainwindow.ui
 	${SOURCES_ROOT}/connectdialog.ui
     ${SOURCES_ROOT}/rundialog.ui
