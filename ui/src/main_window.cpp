@@ -2,8 +2,9 @@
 #include "ui_mainwindow.h"
 #include "connect_dialog.h"
 #include "run_dialog.h"
-#include "symbol_paths_dialog.h"
-#include "symbol_status_dialog.h"
+#include "symbols_dialog.h"
+#include "theme.h"
+#include "icons.h"
 #include <qsettings.h>
 #include "qwt_point_data.h"
 #include "qwt_picker_machine.h"
@@ -22,6 +23,19 @@
 #include <qtimer.h>
 #include <qprogressdialog.h>
 #include <qfileinfo.h>
+#include <qtoolbutton.h>
+#include <qtoolbar.h>
+#include <qstatusbar.h>
+#include <qlabel.h>
+#include <qmenu.h>
+#include <qactiongroup.h>
+#include <qshortcut.h>
+#include <qheaderview.h>
+#include <qframe.h>
+#include <qpainter.h>
+#include <qevent.h>
+#include "qwt_plot_canvas.h"
+#include "qwt_plot_grid.h"
 #include <atomic>
 
 // Callstacks-table population/row-height passes: rows per event-loop pump, and
@@ -183,8 +197,8 @@ main_window::main_window(QWidget* parent) :
 
     // --------- Symbol paths ---------
 
-    connect(m_ui->actionSymbolPaths, &QAction::triggered, this, &main_window::onConfigureSymbolPaths);
-    connect(m_ui->actionSymbolStatus, &QAction::triggered, this, &main_window::onShowSymbolStatus);
+    connect(m_ui->actionSymbolPaths, &QAction::triggered, this, &main_window::onShowSymbols);
+    connect(m_ui->actionSymbolStatus, &QAction::triggered, this, &main_window::onShowSymbols);
     // Apply the saved symbol search path so native callstacks resolve from the start
     {
         QStringList paths = QSettings().value("symbols/paths").toStringList();
@@ -299,8 +313,7 @@ main_window::main_window(QWidget* parent) :
     // --------- Graphs ---------
 
     m_ui->allocationsGraph->setAutoReplot(true);
-    //TODO: Scale without scientific notation
-    //m_ui->allocationsGraph->setAxisScaleDraw(QwtPlot::yLeft, &?);
+    m_ui->allocationsGraph->setAxisScaleDraw(QwtPlot::yLeft, new counts_scale_draw());
 
     m_ui->sizeGraph->setAutoReplot(true);
     m_ui->sizeGraph->setAxisScaleDraw(QwtPlot::yLeft, new bytes_scale_draw());
@@ -308,14 +321,12 @@ main_window::main_window(QWidget* parent) :
     m_allocations_chart.attach(m_ui->allocationsGraph);
     m_allocations_chart.setData(new ui_data_allocations(m_data));
     m_allocations_chart.setStyle(QwtPlotHistogram::Columns);
-    m_allocations_chart.setPen(QColor::fromRgb(255, 0, 0));
-    m_allocations_chart.setBrush(QBrush(QColor::fromRgb(255, 0, 0)));
 
-    // Committed-memory line first (drawn under the tracked line), red so the overhead gap reads clearly
+    // Committed-memory line first, drawn under the tracked line, so the
+    // overhead gap between the two reads clearly
     m_committed_chart.attach(m_ui->sizeGraph);
     m_committed_chart.setData(new ui_data_committed(m_data));
     m_committed_chart.setStyle(QwtPlotCurve::Lines);
-    m_committed_chart.setPen(QColor::fromRgb(200, 40, 40));
     m_committed_chart.setTitle("Committed (process)");
 
     m_size_chart.attach(m_ui->sizeGraph);
@@ -324,7 +335,6 @@ main_window::main_window(QWidget* parent) :
     m_size_chart.setPen(QColor::fromRgb(0, 0, 0));
     m_size_chart.setTitle("Tracked allocations");
 
-    m_ui->sizeGraph->insertLegend(new QwtLegend(), QwtPlot::TopLegend);
 
     // --------- Live objects tab ---------
 
@@ -381,8 +391,9 @@ main_window::main_window(QWidget* parent) :
     m_ui->allocationsGraph->installEventFilter(this);
     m_ui->sizeGraph->installEventFilter(this);
 
-    m_ui->allocationsGraph->axisScaleDraw(QwtPlot::yLeft)->setMinimumExtent(100);
-    m_ui->sizeGraph->axisScaleDraw(QwtPlot::yLeft)->setMinimumExtent(100);
+    // Both plots share one X axis, so their canvases must start at the same x;
+    // syncAxisExtents() keeps them there as the labels change width
+    syncAxisExtents();
 
     // --------- Context menus ---------
 
@@ -405,6 +416,22 @@ main_window::main_window(QWidget* parent) :
     m_liveObjectsMenu->addAction(new QAction("Export to CSV", this));
 
     connect(m_liveObjectsMenu->actions()[0], SIGNAL(triggered(bool)), this, SLOT(onTypesMenuAction(bool)));
+
+    // --------- Look and feel ---------
+
+    setupChrome();
+    setupPlotStyle();
+    setupTableStyle();
+
+    // A tool that reopens exactly as you left it feels finished
+    {
+        QSettings settings;
+        restoreGeometry(settings.value("window/geometry").toByteArray());
+        restoreState(settings.value("window/state").toByteArray());
+        const QByteArray splitter = settings.value("window/splitter").toByteArray();
+        if (!splitter.isEmpty())
+            m_ui->splitter->restoreState(splitter);
+    }
 }
 
 main_window::~main_window()
@@ -489,6 +516,7 @@ void main_window::onOpenData()
 // runs on a worker thread.
 void main_window::finishOpenData()
 {
+    syncAxisExtents();
     m_is_db_temporary = false;
 
     m_data->clear();
@@ -696,34 +724,199 @@ void main_window::onStopProfiling()
     m_ui->actionStop_Profiling->setEnabled(false);
 }
 
-void main_window::onConfigureSymbolPaths()
+void main_window::onShowSymbols()
 {
-    QSettings settings;
-    QStringList paths = settings.value("symbols/paths").toStringList();
+    if (m_symbols_dialog == nullptr)
+    {
+        m_symbols_dialog = new symbols_dialog(&m_client, this);
+        connect(m_symbols_dialog, &symbols_dialog::symbolPathsChanged, this, &main_window::refreshSymbolsIndicator);
+    }
 
-    symbol_paths_dialog dlg(paths, this);
-    if (dlg.exec() != QDialog::Accepted)
-        return;
-
-    paths = dlg.paths();
-    settings.setValue("symbols/paths", paths);
-
-    // Apply immediately: the client re-resolves all known callstacks in the background
-    m_client.set_symbol_paths(paths.join(';').toStdString());
+    m_symbols_dialog->show();
+    m_symbols_dialog->raise();
+    m_symbols_dialog->activateWindow();
 }
 
-void main_window::onShowSymbolStatus()
+void main_window::onThemeChanged()
 {
-    if (m_symbol_status_dialog == nullptr)
-        m_symbol_status_dialog = new symbol_status_dialog(&m_client, this);
+    auto* action = qobject_cast<QAction*>(sender());
+    if (action == nullptr)
+        return;
 
-    m_symbol_status_dialog->show();
-    m_symbol_status_dialog->raise();
-    m_symbol_status_dialog->activateWindow();
+    theme::set_preference(action->data().toString());
+    icons::invalidate();
+
+    // Re-apply everything that reads the token table directly
+    setupPlotStyle();
+    setupTableStyle();
+    m_ui->actionOpen->setIcon(icons::open());
+    m_ui->actionSave->setIcon(icons::save());
+    m_ui->actionStart_Profiling->setIcon(icons::connect_app());
+    m_ui->actionRunUnityApp->setIcon(icons::run_app());
+    m_ui->actionStop_Profiling->setIcon(icons::stop());
+    m_ui->actionPause_App->setIcon(icons::pause());
+    if (m_symbols_button != nullptr)
+        m_symbols_button->setIcon(icons::symbols());
+    refreshSymbolsIndicator();
+}
+
+/*
+    The toolbar extras (capture mode, Symbols, Settings), the status-bar
+    indicators and the filter-box affordances. Everything here is created in
+    code because the .ui format cannot express a menu button or a status-bar
+    permanent widget.
+*/
+void main_window::setupChrome()
+{
+    const auto& t = theme::tokens();
+
+    setWindowIcon(icons::app());
+
+    m_ui->actionOpen->setIcon(icons::open());
+    m_ui->actionSave->setIcon(icons::save());
+    m_ui->actionStart_Profiling->setIcon(icons::connect_app());
+    m_ui->actionRunUnityApp->setIcon(icons::run_app());
+    m_ui->actionStop_Profiling->setIcon(icons::stop());
+    m_ui->actionPause_App->setIcon(icons::pause());
+
+    // Shortcuts belong in the tooltip, not only in the menu
+    for (QAction* action : { m_ui->actionOpen, m_ui->actionSave, m_ui->actionStart_Profiling, m_ui->actionStop_Profiling })
+        if (!action->shortcut().isEmpty())
+            action->setToolTip(QString("%1 (%2)").arg(action->toolTip().isEmpty() ? action->text() : action->toolTip(),
+                                                      action->shortcut().toString(QKeySequence::NativeText)));
+
+    m_ui->toolBar->insertSeparator(m_ui->actionStart_Profiling);
+
+    // ---- right-hand side of the toolbar ----
+
+    auto* spacer = new QWidget(this);
+    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    m_ui->toolBar->addWidget(spacer);
+
+    m_capture_mode_label = new QLabel(this);
+    m_capture_mode_label->setStyleSheet(QString("color: %1; padding-right: 4px;").arg(t.text_dim.name()));
+    m_ui->toolBar->addWidget(m_capture_mode_label);
+
+    m_ui->toolBar->addSeparator();
+
+    // Symbols is the one setting that changes what the callstack pane can show,
+    // so it gets a button carrying its own state rather than a menu entry
+    m_symbols_button = new QToolButton(this);
+    m_symbols_button->setIcon(icons::symbols());
+    m_symbols_button->setText(tr("Symbols"));
+    m_symbols_button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_symbols_button->setToolTip(tr("Symbol search paths and per-module resolution status"));
+    connect(m_symbols_button, &QToolButton::clicked, this, &main_window::onShowSymbols);
+    m_ui->toolBar->addWidget(m_symbols_button);
+
+    m_symbols_badge = new QLabel(this);
+    m_symbols_badge->setFont(theme::mono_font(-1));
+    m_symbols_badge->setCursor(Qt::PointingHandCursor);
+    m_symbols_badge->installEventFilter(this);
+    m_ui->toolBar->addWidget(m_symbols_badge);
+
+    // ---- settings menu (everything that is not symbols) ----
+
+    auto* settings_menu = new QMenu(this);
+
+    auto* theme_group = new QActionGroup(this);
+    theme_group->setExclusive(true);
+    const QString current_pref = theme::preference();
+    struct { const char* label; const char* value; } themes[] = {
+        { "Dark theme", "dark" }, { "Light theme", "light" }, { "Follow system", "system" } };
+    for (const auto& entry : themes)
+    {
+        auto* action = settings_menu->addAction(tr(entry.label));
+        action->setCheckable(true);
+        action->setData(QString(entry.value));
+        action->setChecked(current_pref == entry.value);
+        theme_group->addAction(action);
+        connect(action, &QAction::triggered, this, &main_window::onThemeChanged);
+    }
+
+    settings_menu->addSeparator();
+    auto* symbols_entry = settings_menu->addAction(icons::symbols(), tr("Symbols..."));
+    connect(symbols_entry, &QAction::triggered, this, &main_window::onShowSymbols);
+
+    auto* settings_button = new QToolButton(this);
+    settings_button->setIcon(icons::settings());
+    settings_button->setText(tr("Settings"));
+    settings_button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    settings_button->setPopupMode(QToolButton::InstantPopup);
+    settings_button->setMenu(settings_menu);
+    m_ui->toolBar->addWidget(settings_button);
+
+    // ---- status bar ----
+
+    m_status_symbols = new QLabel(this);
+    m_status_symbols->setCursor(Qt::PointingHandCursor);
+    m_status_symbols->setToolTip(tr("Open the Symbols window"));
+    m_status_symbols->installEventFilter(this);
+    statusBar()->addPermanentWidget(m_status_symbols);
+
+    // ---- filter boxes ----
+
+    for (QLineEdit* filter : { m_ui->typesFilter, m_ui->callstackFilter, m_ui->searchTypesFilter, m_ui->searchCallstackFilter })
+    {
+        filter->setClearButtonEnabled(true);
+        filter->addAction(icons::search(), QLineEdit::LeadingPosition);
+    }
+
+    auto* find_shortcut = new QShortcut(QKeySequence::Find, this);
+    connect(find_shortcut, &QShortcut::activated, this, [this]()
+    {
+        // Ctrl+F focuses the filter of whichever tab is in front
+        QLineEdit* target = m_ui->tabWidget->currentWidget() == m_ui->searchResultsTab
+            ? m_ui->searchTypesFilter : m_ui->typesFilter;
+        target->setFocus(Qt::ShortcutFocusReason);
+        target->selectAll();
+    });
+
+    buildLegend();
+
+    // Symbolication happens on a background thread whether or not a capture is
+    // being recorded, so this ticks independently of the profiling timer
+    connect(&m_chrome_timer, &QTimer::timeout, this, &main_window::refreshSymbolsIndicator);
+    connect(&m_chrome_timer, &QTimer::timeout, this, &main_window::syncAxisExtents);
+    m_chrome_timer.start(1500);
+    refreshSymbolsIndicator();
+}
+
+void main_window::refreshSymbolsIndicator()
+{
+    const auto& t = theme::tokens();
+
+    int resolved = 0, total = 0;
+    symbols_dialog::module_counts(&m_client, resolved, total);
+    const size_t pending = m_client.get_symbolication_pending();
+
+    if (total == 0)
+    {
+        m_symbols_badge->clear();
+        m_status_symbols->setText(QString());
+        return;
+    }
+
+    const bool all_good = resolved == total;
+    const QColor color = all_good ? t.ok : t.warn;
+
+    m_symbols_badge->setText(QString("%1 / %2").arg(resolved).arg(total));
+    m_symbols_badge->setStyleSheet(QString("color: %1; padding-right: 6px;").arg(color.name()));
+    m_symbols_badge->setToolTip(all_good
+        ? tr("Symbols found for every module")
+        : tr("%1 module(s) without symbols - native frames stay as module+offset").arg(total - resolved));
+
+    QString status = tr("symbols: %1 of %2").arg(resolved).arg(total);
+    if (pending > 0)
+        status += tr(" (resolving %1)").arg(pending);
+    m_status_symbols->setText(status + "  \u203a");
+    m_status_symbols->setStyleSheet(QString("color: %1; border-bottom: 1px dotted %2; padding: 0 4px;")
+        .arg(color.name(), t.text_faint.name()));
 }
 
 void main_window::onAllocationsScrolled(int value)
 {
+    syncAxisExtents();
     m_pos = value;
     setZoom(m_zoom);
 }
@@ -855,8 +1048,16 @@ void main_window::onPickerChanged(const QPolygon& selection)
     QRect rect(selection.first(), selection.last());
     rect = rect.normalized();
 
-    const double left = m_ui->allocationsGraph->invTransform(QwtPlot::xBottom, rect.left());
-    const double right = m_ui->allocationsGraph->invTransform(QwtPlot::xBottom, rect.right());
+    // The polygon is in the canvas pixels of the plot that was dragged, so it
+    // must be mapped back through THAT plot: the two canvases can start at
+    // different x (their left-axis labels differ in width), and using the wrong
+    // transform shifted every selection made on the memory graph
+    QwtPlot* source = m_ui->allocationsGraph;
+    if (sender() == m_size_picker.get())
+        source = m_ui->sizeGraph;
+
+    const double left = source->invTransform(QwtPlot::xBottom, rect.left());
+    const double right = source->invTransform(QwtPlot::xBottom, rect.right());
 
     // Frame f occupies [f, f+1) on the X axis. The selection is computed as an
     // INCLUSIVE frame range [first_frame, last_frame] - every frame whose column
@@ -868,7 +1069,7 @@ void main_window::onPickerChanged(const QPolygon& selection)
     // A drag that reaches the right edge of the canvas means "up to the end of
     // what is visible": include the boundary frame, whose data point can sit
     // exactly on the edge of the axis
-    if (rect.right() >= m_ui->allocationsGraph->canvas()->width() - 2)
+    if (rect.right() >= source->canvas()->width() - 2)
         last_frame = (int)floor(right);
 
     // A click exactly on a frame boundary still selects one frame
@@ -984,6 +1185,14 @@ void main_window::onReferenceExpanded(QModelIndex index)
 
 bool main_window::eventFilter(QObject* object, QEvent* event)
 {
+    // The Symbols badge and the status-bar entry are plain QLabels acting as
+    // shortcuts to the Symbols window (a QLabel has no clicked() signal)
+    if ((object == m_symbols_badge || object == m_status_symbols) && event->type() == QEvent::MouseButtonRelease)
+    {
+        onShowSymbols();
+        return true;
+    }
+
     // We want wheel to act as zoom any time when the cursor is over allocation graph or size graph
     if (event->type() == QEvent::Wheel)
     {
@@ -1060,13 +1269,152 @@ void main_window::timerEvent(QTimerEvent* ev)
 void main_window::closeEvent(QCloseEvent* ev)
 {
     if (!trySaveUnsavedData())
+    {
         ev->ignore();
-    else
-        ev->accept();
+        return;
+    }
+
+    QSettings settings;
+    settings.setValue("window/geometry", saveGeometry());
+    settings.setValue("window/state", saveState());
+    settings.setValue("window/splitter", m_ui->splitter->saveState());
+
+    ev->accept();
+}
+
+/*
+    Everything the plots take from the token table. Qwt does not read the
+    application stylesheet, so this is where the theme reaches the charts -
+    and it is re-run on a theme switch.
+*/
+void main_window::setupPlotStyle()
+{
+    const auto& t = theme::tokens();
+
+    struct plot_entry { QwtPlot* plot; };
+    for (QwtPlot* plot : { (QwtPlot*)m_ui->allocationsGraph, (QwtPlot*)m_ui->sizeGraph })
+    {
+        plot->setCanvasBackground(QBrush(t.plot_bg));
+
+        // The sunken 3D frame Qwt draws by default is the single most dated
+        // pixel in the window; the panel around the plot carries the border
+        // static_cast, not qobject_cast: the Qwt DLL does not export
+        // QwtPlotCanvas::staticMetaObject, and QwtPlot always creates a
+        // QwtPlotCanvas here (we never swap in a different canvas)
+        if (auto* canvas = static_cast<QwtPlotCanvas*>(plot->canvas()))
+        {
+            canvas->setFrameStyle(QFrame::NoFrame);
+            canvas->setBorderRadius(4);
+        }
+
+        QPalette plot_palette = plot->palette();
+        plot_palette.setColor(QPalette::WindowText, t.text_dim);
+        plot_palette.setColor(QPalette::Text, t.text_dim);
+        plot->setPalette(plot_palette);
+
+        for (int axis : { QwtPlot::yLeft, QwtPlot::xBottom })
+        {
+            QFont axis_font = theme::mono_font(-1);
+            plot->setAxisFont(axis, axis_font);
+            if (auto* scale = plot->axisWidget(axis))
+            {
+                QPalette scale_palette = scale->palette();
+                scale_palette.setColor(QPalette::WindowText, t.border_strong);  // ticks
+                scale_palette.setColor(QPalette::Text, t.text_dim);             // labels
+                scale->setPalette(scale_palette);
+            }
+        }
+
+        // Horizontal rules only: the curve should stay the loudest thing here
+        auto* grid = new QwtPlotGrid();
+        grid->setPen(QPen(t.grid, 1.0, Qt::SolidLine));
+        grid->enableX(false);
+        grid->enableY(true);
+        grid->enableXMin(false);
+        grid->enableYMin(false);
+        grid->setZ(0);
+        // Replaces the grid attached by a previous call (Qwt deletes detached items it owns)
+        for (QwtPlotItem* item : plot->itemList(QwtPlotItem::Rtti_PlotGrid))
+        {
+            item->detach();
+            delete item;
+        }
+        grid->attach(plot);
+    }
+
+    // Allocation counts: thin muted-violet columns, so pure red is free again
+    // for anomalies rather than meaning "allocations" and "committed" at once
+    m_allocations_chart.setPen(QPen(t.series_allocs, 0.0));
+    m_allocations_chart.setBrush(QBrush(t.series_allocs));
+    m_allocations_chart.setRenderHint(QwtPlotItem::RenderAntialiased, true);
+
+    QPen committed_pen(t.series_committed, 1.4, Qt::DashLine);
+    m_committed_chart.setPen(committed_pen);
+    m_committed_chart.setRenderHint(QwtPlotItem::RenderAntialiased, true);
+
+    QPen tracked_pen(t.series_tracked, 1.6);
+    m_size_chart.setPen(tracked_pen);
+    m_size_chart.setRenderHint(QwtPlotItem::RenderAntialiased, true);
+
+    // Area fill under the tracked line, fading to nothing at the baseline
+    QLinearGradient fill(0, 0, 0, 1);
+    fill.setCoordinateMode(QGradient::ObjectBoundingMode);
+    QColor fill_top = t.series_tracked;
+    fill_top.setAlphaF(0.22);
+    QColor fill_bottom = t.series_tracked;
+    fill_bottom.setAlphaF(0.02);
+    fill.setColorAt(0.0, fill_top);
+    fill.setColorAt(1.0, fill_bottom);
+    m_size_chart.setBrush(QBrush(fill));
+
+    // Selection band across both plots
+    QColor band = t.selection_band;
+    band.setAlphaF(0.10);
+    m_allocationsZone.setBrush(QBrush(band));
+    m_sizeZone.setBrush(QBrush(band));
+
+    if (m_legend != nullptr)
+        updateLegendColors();
+
+    // The pickers paint the cursor readout and the selection band themselves
+    if (m_allocations_picker)
+        m_allocations_picker->apply_theme();
+    if (m_size_picker)
+        m_size_picker->apply_theme();
+
+    m_ui->allocationsGraph->replot();
+    m_ui->sizeGraph->replot();
+}
+
+/*
+    Row/header presentation for the four data tables. Numbers are drawn in a
+    monospace face with tabular figures so columns of sizes stop jittering;
+    the alignment itself comes from the models (Qt::TextAlignmentRole).
+*/
+void main_window::setupTableStyle()
+{
+    const QFont mono = theme::mono_font(0);
+
+    for (QTableView* view : { m_ui->liveObjectsList, m_ui->callstacksList,
+                              m_ui->searchTypesList, m_ui->searchCallstacksList })
+    {
+        view->setFont(mono);
+        view->setShowGrid(false);
+        view->setAlternatingRowColors(false);
+        view->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        view->horizontalHeader()->setHighlightSections(false);
+        view->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    }
+
+    m_ui->objectReferences->setFont(mono);
+
+    for (QLabel* label : { m_ui->liveObjectsSizeLabel, m_ui->callstacksSizeLabel })
+        label->setStyleSheet(QString("color: %1;").arg(theme::tokens().text_dim.name()));
 }
 
 void main_window::setZoom(float new_zoom)
 {
+    syncAxisExtents();
     m_zoom = new_zoom;
     if (m_zoom <= 0.02f)
         m_zoom = 0.02f;
@@ -1329,5 +1677,126 @@ void main_window::export_types_to_csv()
     if (!m_live_objects_data.export_to_csv(file_name.toStdString()))
     {
         QMessageBox::critical(nullptr, "Error", "Failed to save types to CSV", QMessageBox::Ok);
+    }
+}
+
+/*
+    A legend row above the plots. Qwt's own QwtLegend spent a full widget row
+    on two centred entries; this is one 20px line that also leaves room for
+    the GC / marker entries the events strip will add.
+*/
+void main_window::buildLegend()
+{
+    m_legend = new QWidget(this);
+    auto* layout = new QHBoxLayout(m_legend);
+    layout->setContentsMargins(56, 2, 6, 2);
+    layout->setSpacing(14);
+
+    struct entry { const char* object_name; const char* text; bool bar; };
+    static const entry entries[] = {
+        { "legend_tracked",   "Tracked allocations", false },
+        { "legend_committed", "Committed (process)", false },
+        { "legend_allocs",    "Allocations / frame", true  },
+    };
+
+    for (const auto& e : entries)
+    {
+        auto* item = new QWidget(m_legend);
+        auto* item_layout = new QHBoxLayout(item);
+        item_layout->setContentsMargins(0, 0, 0, 0);
+        item_layout->setSpacing(6);
+
+        auto* swatch = new QFrame(item);
+        swatch->setObjectName(e.object_name);
+        swatch->setFixedSize(e.bar ? QSize(4, 10) : QSize(11, 2));
+        item_layout->addWidget(swatch, 0, Qt::AlignVCenter);
+
+        auto* label = new QLabel(tr(e.text), item);
+        item_layout->addWidget(label, 0, Qt::AlignVCenter);
+
+        layout->addWidget(item);
+    }
+
+    layout->addStretch();
+
+    // Selection summary: the frame range every table below is computed from,
+    // which the UI never used to state anywhere
+    m_selection_label = new QLabel(m_legend);
+    m_selection_label->setFont(theme::mono_font(-1));
+    layout->addWidget(m_selection_label);
+
+    m_ui->verticalLayout->insertWidget(0, m_legend);
+    m_ui->verticalLayout->setStretch(0, 0);   // legend
+    m_ui->verticalLayout->setStretch(1, 1);   // allocations plot
+    m_ui->verticalLayout->setStretch(2, 0);   // scrollbar
+    m_ui->verticalLayout->setStretch(3, 1);   // size plot
+    m_ui->verticalLayout->setStretch(4, 0);   // snap-to-GC row
+
+    updateLegendColors();
+}
+
+void main_window::updateLegendColors()
+{
+    const auto& t = theme::tokens();
+
+    struct swatch_color { const char* object_name; QColor color; };
+    const swatch_color colors[] = {
+        { "legend_tracked",   t.series_tracked },
+        { "legend_committed", t.series_committed },
+        { "legend_allocs",    t.series_allocs },
+    };
+
+    for (const auto& c : colors)
+    {
+        if (auto* swatch = m_legend->findChild<QFrame*>(c.object_name))
+            swatch->setStyleSheet(QString("background: %1; border: none;").arg(c.color.name()));
+    }
+
+    for (QLabel* label : m_legend->findChildren<QLabel*>())
+        label->setStyleSheet(QString("color: %1;").arg(t.text_dim.name()));
+}
+
+/*
+    The allocations and memory plots stack vertically and share an X axis, so a
+    selection dragged on one is drawn on the other - which only lines up if both
+    canvases start at the same x. Their left-axis labels differ in width ("500k"
+    against "667.57Mb") and change as you scroll, so measure both and give each
+    the wider extent.
+*/
+void main_window::syncAxisExtents()
+{
+    auto measure = [](QwtPlot* plot) -> double
+    {
+        auto* scale = plot->axisScaleDraw(QwtPlot::yLeft);
+        // extent() clamps to the current minimum, so clear it while measuring or
+        // the value would only ever ratchet upwards
+        const double saved = scale->minimumExtent();
+        scale->setMinimumExtent(0.0);
+        const double needed = scale->extent(plot->axisFont(QwtPlot::yLeft));
+        scale->setMinimumExtent(saved);
+        return needed;
+    };
+
+    const double extent = qMax(qMax(measure(m_ui->allocationsGraph), measure(m_ui->sizeGraph)), 44.0);
+    if (qAbs(extent - m_axis_extent) < 0.5)
+        return;
+
+    m_axis_extent = extent;
+    for (QwtPlot* plot : { (QwtPlot*)m_ui->allocationsGraph, (QwtPlot*)m_ui->sizeGraph })
+    {
+        plot->axisScaleDraw(QwtPlot::yLeft)->setMinimumExtent(extent);
+        // updateLayout() is what re-places the canvas and the scale widgets;
+        // replot() alone repaints inside the old geometry, which left the two
+        // canvases misaligned until some later event forced a layout
+        plot->updateLayout();
+        plot->replot();
+    }
+
+    // The legend row sits above the plots; keep its text over the canvas, not
+    // over the axis gutter
+    if (m_legend != nullptr)
+    {
+        if (auto* legend_layout = qobject_cast<QHBoxLayout*>(m_legend->layout()))
+            legend_layout->setContentsMargins((int)extent + 2, 2, 6, 2);
     }
 }

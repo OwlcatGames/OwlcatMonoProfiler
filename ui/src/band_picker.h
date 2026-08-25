@@ -44,6 +44,8 @@ public:
     };
 
     band_picker(QWidget* widget, y_format format);
+    // Re-reads colours and fonts from theme::tokens() (call after a theme switch)
+    void apply_theme();
     virtual void drawRubberBand(QPainter* painter) const override;
     virtual QRegion rubberBandMask() const override;
     virtual QwtText trackerTextF(const QPointF& pos) const override;
@@ -55,6 +57,10 @@ public:
     void set_value_text(value_text_func func) { m_value_text = func; }
 
 private:
+    // Canvas-pixel rect of the current selection band (painting and mask share it)
+    QRect band_rect() const;
+    QwtText make_tracker_text(const QString& text) const;
+
     y_format m_y_format;
     value_text_func m_value_text;
 };

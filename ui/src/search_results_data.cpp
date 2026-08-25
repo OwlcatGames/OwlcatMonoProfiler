@@ -20,6 +20,13 @@ int search_results_types_model::columnCount(const QModelIndex&) const
 
 QVariant search_results_types_model::data(const QModelIndex& index, int role) const
 {
+    if (role == Qt::TextAlignmentRole)
+    {
+        // Count and Size are numbers: right-aligned, so magnitudes line up
+        return index.column() == 0 ? QVariant(Qt::AlignLeft | Qt::AlignVCenter)
+                                   : QVariant(Qt::AlignRight | Qt::AlignVCenter);
+    }
+
     if (role != Qt::DisplayRole && role != role::Type)
         return QVariant();
 
@@ -117,6 +124,13 @@ int search_results_callstacks_model::columnCount(const QModelIndex&) const
 
 QVariant search_results_callstacks_model::data(const QModelIndex& index, int role) const
 {
+    if (role == Qt::TextAlignmentRole)
+    {
+        // Count and Size are numbers: right-aligned, so magnitudes line up
+        return index.column() == 0 ? QVariant(Qt::AlignLeft | Qt::AlignVCenter)
+                                   : QVariant(Qt::AlignRight | Qt::AlignVCenter);
+    }
+
     if (role != Qt::DisplayRole && role != role::Callstack && role != role::Lines)
         return QVariant();
 

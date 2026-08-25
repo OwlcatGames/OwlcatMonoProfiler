@@ -26,7 +26,9 @@ namespace Ui {
     class MainWindow;
 }
 
-class symbol_status_dialog;
+class symbols_dialog;
+class QToolButton;
+class QLabel;
 
 /*
     Thread class that calls a callback on main thread when finished
@@ -84,8 +86,9 @@ public slots:
     void onStartProfiling();
     void onRunUnityApp();
     void onStopProfiling();
-    void onConfigureSymbolPaths();
-    void onShowSymbolStatus();
+    // Both Settings menu items and the toolbar button open the one Symbols window
+    void onShowSymbols();
+    void onThemeChanged();
     void onAllocationsScrolled(int);    
     void onLiveObjectTypeSelected(const QItemSelection& selected, const QItemSelection& deselected);
     void onSearchTypeSelected(const QItemSelection& selected, const QItemSelection& deselected);
@@ -137,6 +140,18 @@ private:
     // Sets every row's height from the model's Lines role (chunked, pumps
     // events, drives s.bar when manage_bar). Returns false if cancelled.
     bool applyRowHeights(callstacks_view_state& s, uint64_t generation, int progress_offset, bool manage_bar);
+    // Toolbar extras, status-bar indicators and plot styling; the .ui only
+    // carries the actions and the widgets themselves
+    void setupChrome();
+    void setupPlotStyle();
+    void setupTableStyle();
+    // Keeps the two plots' canvases starting at the same x (shared X axis)
+    void syncAxisExtents();
+    // Compact legend row above the plots, replacing Qwt's own top legend
+    void buildLegend();
+    void updateLegendColors();
+    // Refreshes the Symbols button badge and the status-bar entry from the client
+    void refreshSymbolsIndicator();
     // Coalesces height re-application (sort/filter changes) into one deferred pass
     void scheduleRowHeights(callstacks_view_state& s);
 
@@ -191,8 +206,22 @@ private:
     QScopedPointer<QMenu> m_referencesMenu;
     QScopedPointer<QMenu> m_liveObjectsMenu;
 
-    // Modeless "Symbol resolution status" window; created on first use, parented to this
-    symbol_status_dialog* m_symbol_status_dialog = nullptr;
+    // Modeless Symbols window (paths + per-module status); created on first use
+    symbols_dialog* m_symbols_dialog = nullptr;
+
+    // Toolbar/status-bar chrome created in setupChrome()
+    QToolButton* m_symbols_button = nullptr;
+    QLabel*      m_symbols_badge = nullptr;
+    QLabel*      m_capture_mode_label = nullptr;
+    QLabel*      m_status_symbols = nullptr;
+    QWidget*     m_legend = nullptr;
+    QLabel*      m_selection_label = nullptr;
+    // Drives refreshSymbolsIndicator() while the app is idle as well as while
+    // profiling (symbolication runs on a background thread either way)
+    QTimer       m_chrome_timer;
+
+    // Left-axis extent currently forced on both plots (see syncAxisExtents)
+    double m_axis_extent = 0.0;
 
     float m_zoom = 1.0f;
     int m_pos = 0;

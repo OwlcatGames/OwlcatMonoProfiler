@@ -1,4 +1,5 @@
 #include "live_objects_data.h"
+#include <qlocale.h>
 #include "common_ui.h"
 
 #include <algorithm>
@@ -38,6 +39,13 @@ int live_objects_by_type_model::columnCount(const QModelIndex&) const
 
 QVariant live_objects_by_type_model::data(const QModelIndex& index, int role) const
 {
+    if (role == Qt::TextAlignmentRole)
+    {
+        // Count and Size are numbers: right-aligned, so magnitudes line up
+        return index.column() == 0 ? QVariant(Qt::AlignLeft | Qt::AlignVCenter)
+                                   : QVariant(Qt::AlignRight | Qt::AlignVCenter);
+    }
+
     if (role != Qt::DisplayRole && role != role::Type && role != role::Size)
         return QVariant();
 
@@ -54,7 +62,7 @@ QVariant live_objects_by_type_model::data(const QModelIndex& index, int role) co
     if (col == 0)
         return m_data->get_type_name(m_rows[row].type);
     else if (col == 1)
-        return (qulonglong)m_rows[row].count;
+        return QLocale().toString((qulonglong)m_rows[row].count);
     else
         return size_to_string(m_rows[row].size);
 }
@@ -177,6 +185,13 @@ int live_callstacks_by_type_model::columnCount(const QModelIndex&) const
 
 QVariant live_callstacks_by_type_model::data(const QModelIndex& index, int role) const
 {
+    if (role == Qt::TextAlignmentRole)
+    {
+        // Count and Size are numbers: right-aligned, so magnitudes line up
+        return index.column() == 0 ? QVariant(Qt::AlignLeft | Qt::AlignVCenter)
+                                   : QVariant(Qt::AlignRight | Qt::AlignVCenter);
+    }
+
     if (role != Qt::DisplayRole && role != role::Callstack && role != role::Size && role != role::Lines)
         return QVariant();
 
@@ -195,7 +210,7 @@ QVariant live_callstacks_by_type_model::data(const QModelIndex& index, int role)
     if (col == 0)
         return QString::fromStdString(m_data->get_callstack(m_rows[row].callstack));
     else if (col == 1)
-        return (qulonglong)m_rows[row].count;
+        return QLocale().toString((qulonglong)m_rows[row].count);
     else
         return size_to_string(m_rows[row].size);
 }
