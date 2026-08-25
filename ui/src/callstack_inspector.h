@@ -25,6 +25,9 @@ public:
     // full_text: the callstack as the model provides it, one frame per line
     void set_callstack(const QString& full_text, quint64 objects, quint64 bytes);
     void clear_callstack();
+    // Re-reads icons and colours after a theme switch (both are baked in at
+    // paint/render time: QIcon pixmaps and the frame list's HTML)
+    void apply_theme();
 
 signals:
     void findReferencesRequested();
@@ -33,12 +36,13 @@ private slots:
     void copyToClipboard();
 
 private:
-    void apply_theme();
-
     QLabel*        m_header;
     QLabel*        m_stats;
     QTextBrowser*  m_frames;
     QPushButton*   m_find_references;
     QPushButton*   m_copy;
     QString        m_plain_text;
+    // Kept so a theme switch can re-render the frame list
+    quint64        m_objects = 0;
+    quint64        m_bytes = 0;
 };

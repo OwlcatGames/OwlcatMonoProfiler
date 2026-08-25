@@ -785,6 +785,23 @@ void main_window::onThemeChanged()
     m_ui->actionPause_App->setIcon(icons::pause());
     if (m_symbols_button != nullptr)
         m_symbols_button->setIcon(icons::symbols());
+    if (m_settings_button != nullptr)
+        m_settings_button->setIcon(icons::settings());
+    if (m_settings_symbols_action != nullptr)
+        m_settings_symbols_action->setIcon(icons::symbols());
+
+    // Painted icons and rendered HTML both bake in the colour they were made
+    // with, so every widget that owns either has to be told
+    if (m_callstack_inspector != nullptr)
+        m_callstack_inspector->apply_theme();
+    if (m_symbols_dialog != nullptr)
+        m_symbols_dialog->apply_theme();
+    if (m_runtime_frames_dialog != nullptr)
+        m_runtime_frames_dialog->apply_theme();
+    if (m_events_strip != nullptr)
+        m_events_strip->update();
+
+    refreshEventsStrip();
     refreshSymbolsIndicator();
 }
 
@@ -883,16 +900,16 @@ void main_window::setupChrome()
     connect(runtime_frames_entry, &QAction::triggered, this, &main_window::onShowRuntimeFrames);
 
     settings_menu->addSeparator();
-    auto* symbols_entry = settings_menu->addAction(icons::symbols(), tr("Symbols..."));
-    connect(symbols_entry, &QAction::triggered, this, &main_window::onShowSymbols);
+    m_settings_symbols_action = settings_menu->addAction(icons::symbols(), tr("Symbols..."));
+    connect(m_settings_symbols_action, &QAction::triggered, this, &main_window::onShowSymbols);
 
-    auto* settings_button = new QToolButton(this);
-    settings_button->setIcon(icons::settings());
-    settings_button->setText(tr("Settings"));
-    settings_button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    settings_button->setPopupMode(QToolButton::InstantPopup);
-    settings_button->setMenu(settings_menu);
-    m_ui->toolBar->addWidget(settings_button);
+    m_settings_button = new QToolButton(this);
+    m_settings_button->setIcon(icons::settings());
+    m_settings_button->setText(tr("Settings"));
+    m_settings_button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_settings_button->setPopupMode(QToolButton::InstantPopup);
+    m_settings_button->setMenu(settings_menu);
+    m_ui->toolBar->addWidget(m_settings_button);
 
     // ---- status bar ----
 

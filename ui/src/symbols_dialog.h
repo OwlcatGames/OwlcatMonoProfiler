@@ -28,6 +28,9 @@ public:
     // out of modules referenced by native frames (system modules excluded).
     static void module_counts(owlcat::mono_profiler_client* client, int& resolved, int& total);
 
+    // Re-reads icons and colours after a theme switch
+    void apply_theme();
+
 signals:
     // Emitted when the search path changed, so the caller can refresh its badge
     void symbolPathsChanged();
@@ -50,6 +53,9 @@ private:
     QTableWidget* m_modules;
     QLabel*       m_summary;
     QLabel*       m_pending;
+    QPushButton*  m_add;
+    QPushButton*  m_re_resolve;
+    QLabel*       m_hint;
     QPushButton*  m_remove;
     QPushButton*  m_up;
     QPushButton*  m_down;

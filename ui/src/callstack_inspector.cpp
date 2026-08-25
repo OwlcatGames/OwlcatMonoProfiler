@@ -11,6 +11,7 @@
 #include <qclipboard.h>
 #include <qguiapplication.h>
 #include <qlocale.h>
+#include <qtextcursor.h>
 
 namespace
 {
@@ -117,6 +118,16 @@ void callstack_inspector::apply_theme()
     m_header->setFont(header_font);
     m_header->setStyleSheet(QString("color: %1;").arg(t.text_dim.name()));
     m_stats->setStyleSheet(QString("color: %1;").arg(t.text_dim.name()));
+
+    // Painted icons carry the colour they were drawn with, so they have to be
+    // rebuilt - a dark-theme icon is invisible on a light background
+    m_copy->setIcon(icons::copy());
+    m_find_references->setIcon(icons::references());
+
+    if (!m_plain_text.isEmpty())
+        set_callstack(m_plain_text, m_objects, m_bytes);
+    else
+        clear_callstack();
 }
 
 void callstack_inspector::clear_callstack()
@@ -137,6 +148,8 @@ void callstack_inspector::set_callstack(const QString& full_text, quint64 object
     const auto& t = theme::tokens();
 
     m_plain_text = full_text;
+    m_objects = objects;
+    m_bytes = bytes;
 
     const QStringList lines = full_text.split('\n', Qt::SkipEmptyParts);
     m_header->setText(tr("CALLSTACK - %n FRAME(S)", "", lines.size()));
@@ -174,6 +187,9 @@ void callstack_inspector::set_callstack(const QString& full_text, quint64 object
     }
     html += "</div>";
     m_frames->setHtml(html);
+    // Start at the leaf: the top of the stack is the part being read
+    m_frames->moveCursor(QTextCursor::Start);
+    m_frames->ensureCursorVisible();
 
     m_stats->setText(tr("%1 live objects - %2")
         .arg(QLocale().toString((qulonglong)objects), size_to_string((double)bytes)));

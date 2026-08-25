@@ -19,7 +19,7 @@ runtime_frames_dialog::runtime_frames_dialog(QWidget* parent)
     layout->setContentsMargins(14, 12, 14, 12);
     layout->setSpacing(8);
 
-    auto* hint = new QLabel(tr(
+    m_hint = new QLabel(tr(
         "Frames matching these patterns are treated as allocator, runtime or engine "
         "plumbing, so a callstack row is labelled with the first frame that is not one "
         "of them. Nothing is hidden: the row shows how many frames were skipped and the "
@@ -28,9 +28,8 @@ runtime_frames_dialog::runtime_frames_dialog(QWidget* parent)
         "  unityplayer.dll, mono_profiler*.dll   module of a native frame (* and ? allowed)\n"
         "  System.,  Array.                      prefix of a managed frame\n"
         "  __icall_wrapper                       substring anywhere in the frame"), this);
-    hint->setWordWrap(true);
-    hint->setStyleSheet(QString("color: %1;").arg(theme::tokens().text_dim.name()));
-    layout->addWidget(hint);
+    m_hint->setWordWrap(true);
+    layout->addWidget(m_hint);
 
     auto* row = new QHBoxLayout();
 
@@ -42,7 +41,8 @@ runtime_frames_dialog::runtime_frames_dialog(QWidget* parent)
     auto* buttons = new QVBoxLayout();
     auto* add = new QPushButton(tr("Add"), this);
     m_remove = new QPushButton(icons::remove(), tr("Remove"), this);
-    auto* defaults = new QPushButton(icons::refresh(), tr("Restore defaults"), this);
+    m_defaults = new QPushButton(icons::refresh(), tr("Restore defaults"), this);
+    auto* defaults = m_defaults;
     buttons->addWidget(add);
     buttons->addWidget(m_remove);
     buttons->addSpacing(12);
@@ -75,6 +75,18 @@ runtime_frames_dialog::runtime_frames_dialog(QWidget* parent)
 
     fill(frame_class::patterns());
     m_remove->setEnabled(false);
+    apply_theme();
+}
+
+void runtime_frames_dialog::apply_theme()
+{
+    const auto& t = theme::tokens();
+
+    m_remove->setIcon(icons::remove());
+    m_defaults->setIcon(icons::refresh());
+    m_hint->setStyleSheet(QString("color: %1;").arg(t.text_dim.name()));
+    m_count->setStyleSheet(QString("color: %1;").arg(t.text_faint.name()));
+    m_list->setFont(theme::mono_font(0));
 }
 
 void runtime_frames_dialog::fill(const QStringList& patterns)

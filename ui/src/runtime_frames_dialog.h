@@ -21,6 +21,9 @@ class runtime_frames_dialog : public QDialog
 public:
     runtime_frames_dialog(QWidget* parent = nullptr);
 
+    // Re-reads icons and colours after a theme switch
+    void apply_theme();
+
 signals:
     // The list changed; views showing callstacks should repaint
     void patternsChanged();
@@ -37,5 +40,7 @@ private:
 
     QListWidget* m_list;
     QPushButton* m_remove;
+    QPushButton* m_defaults;
+    QLabel*      m_hint;
     QLabel*      m_count;
 };

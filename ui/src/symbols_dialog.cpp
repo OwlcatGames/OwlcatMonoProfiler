@@ -89,11 +89,10 @@ symbols_dialog::symbols_dialog(owlcat::mono_profiler_client* client, QWidget* pa
     // ---------------- search paths ----------------
 
     layout->addWidget(section_label(tr("Search paths"), this));
-    auto* hint = new QLabel(tr("Searched in order. A PDB must match the module's GUID and age, not just its name, "
+    m_hint = new QLabel(tr("Searched in order. A PDB must match the module's GUID and age, not just its name, "
                                "so several same-named PDBs on the path are fine."), this);
-    hint->setWordWrap(true);
-    hint->setStyleSheet(QString("color: %1;").arg(theme::tokens().text_faint.name()));
-    layout->addWidget(hint);
+    m_hint->setWordWrap(true);
+    layout->addWidget(m_hint);
 
     auto* paths_row = new QHBoxLayout();
     m_paths = new QListWidget(this);
@@ -107,7 +106,8 @@ symbols_dialog::symbols_dialog(owlcat::mono_profiler_client* client, QWidget* pa
     paths_row->addWidget(m_paths, 1);
 
     auto* path_buttons = new QVBoxLayout();
-    auto* add = new QPushButton(icons::add_folder(), tr("Add folder..."), this);
+    m_add = new QPushButton(icons::add_folder(), tr("Add folder..."), this);
+    auto* add = m_add;
     m_remove = new QPushButton(icons::remove(), tr("Remove"), this);
     m_up = new QPushButton(icons::move_up(), QString(), this);
     m_up->setToolTip(tr("Search this folder earlier"));
@@ -163,9 +163,9 @@ symbols_dialog::symbols_dialog(owlcat::mono_profiler_client* client, QWidget* pa
     // ---------------- footer ----------------
 
     auto* footer = new QHBoxLayout();
-    auto* re_resolve = new QPushButton(icons::refresh(), tr("Re-resolve all callstacks"), this);
-    connect(re_resolve, &QPushButton::clicked, this, &symbols_dialog::reResolve);
-    footer->addWidget(re_resolve);
+    m_re_resolve = new QPushButton(icons::refresh(), tr("Re-resolve all callstacks"), this);
+    connect(m_re_resolve, &QPushButton::clicked, this, &symbols_dialog::reResolve);
+    footer->addWidget(m_re_resolve);
     footer->addStretch();
     auto* close = new QPushButton(tr("Close"), this);
     close->setDefault(true);
@@ -178,6 +178,28 @@ symbols_dialog::symbols_dialog(owlcat::mono_profiler_client* client, QWidget* pa
     auto* timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, &symbols_dialog::refresh);
     timer->start(1000);
+
+    apply_theme();
+}
+
+void symbols_dialog::apply_theme()
+{
+    const auto& t = theme::tokens();
+
+    setWindowIcon(icons::symbols());
+    m_add->setIcon(icons::add_folder());
+    m_remove->setIcon(icons::remove());
+    m_up->setIcon(icons::move_up());
+    m_down->setIcon(icons::move_down());
+    m_re_resolve->setIcon(icons::refresh());
+
+    m_hint->setStyleSheet(QString("color: %1;").arg(t.text_faint.name()));
+    m_pending->setStyleSheet(QString("color: %1;").arg(t.text_dim.name()));
+    m_paths->setFont(theme::mono_font(0));
+    m_modules->setFont(theme::mono_font(0));
+
+    // The module rows carry per-status colours
+    refresh();
 }
 
 void symbols_dialog::showEvent(QShowEvent* ev)

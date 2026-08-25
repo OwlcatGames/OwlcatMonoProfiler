@@ -261,6 +261,8 @@ private:
 
     // Toolbar/status-bar chrome created in setupChrome()
     QToolButton* m_symbols_button = nullptr;
+    QToolButton* m_settings_button = nullptr;
+    QAction*     m_settings_symbols_action = nullptr;
     QLabel*      m_symbols_badge = nullptr;
     QLabel*      m_capture_mode_label = nullptr;
     QLabel*      m_status_symbols = nullptr;
